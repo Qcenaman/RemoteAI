@@ -214,7 +214,7 @@ private fun ApprovalCard(a: Approval, deciding: Boolean, onApprove: (String) -> 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Shield, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
                 Spacer(Modifier.size(8.dp))
-                Text("Approve on your PC? (${a.id})", style = MaterialTheme.typography.titleSmall,
+                Text(if (a.waiting) "Approve now? The PC is waiting (${a.id})" else "Approve on your PC? (${a.id})", style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onTertiaryContainer)
             }
             SelectionContainer {

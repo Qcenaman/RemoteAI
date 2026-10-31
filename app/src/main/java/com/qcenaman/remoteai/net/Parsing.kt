@@ -22,7 +22,8 @@ data class ChatReply(
     val approvals: List<Approval>,
 )
 
-data class Approval(val id: String, val what: String, val expires: String = "")
+/** waiting: a pc call is blocked on this approval and runs in place once approved (ContextSaver approval = "wait"). */
+data class Approval(val id: String, val what: String, val expires: String = "", val waiting: Boolean = false)
 
 private val approvalRe = Regex("""APPROVAL ([0-9a-fA-F]{8}): (.*?)\. Waiting for the user""", RegexOption.DOT_MATCHES_ALL)
 
@@ -88,7 +89,7 @@ fun parseApprovals(body: String): List<Approval> {
         val o = el as? JsonObject ?: return@mapNotNull null
         val status = o["status"].str()
         if (status.isNotEmpty() && status != "pending") return@mapNotNull null
-        Approval(o["id"].str(), o["what"].str(), o["expires"].str())
+        Approval(o["id"].str(), o["what"].str(), o["expires"].str(), o["waiting"].str() == "true")
     }
 }
 

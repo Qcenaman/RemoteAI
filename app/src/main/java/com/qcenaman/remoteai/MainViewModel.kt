@@ -36,22 +36,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
     }
 
-    /** Polls the approval server while the app is in front: fast while a reply or approval is open. */
+    @Volatile private var foreground = false
+    private val notified = mutableSetOf<String>()
+
+    /**
+     * Polls the approval server while the app is in front, and also in the background while a reply is open:
+     * a blocked pc call only waits ~50 s, so an approval must reach the user even with the screen off.
+     */
     fun onForeground() {
+        foreground = true
+        ApprovalNotifier.clear(getApplication())
         if (poller?.isActive == true) return
         poller = viewModelScope.launch {
             controller.refreshModels()
             while (isActive) {
                 controller.pollApprovals()
                 val st = state.value
+                if (!foreground) {
+                    st.pending.filter { it.id !in notified }.forEach {
+                        notified += it.id
+                        ApprovalNotifier.show(getApplication(), it)
+                    }
+                    if (!st.busy && st.pending.isEmpty()) break
+                }
                 delay(if (st.busy || st.pending.isNotEmpty()) 3_000 else 15_000)
             }
         }
     }
 
     fun onBackground() {
-        poller?.cancel()
-        poller = null
+        foreground = false
+        if (!state.value.busy) {
+            poller?.cancel()
+            poller = null
+        }
     }
 
     fun send(text: String) = viewModelScope.launch { controller.send(text) }

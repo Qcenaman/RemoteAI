@@ -99,4 +99,10 @@ class ProvisionTest {
         assertEquals(listOf("de7d0534"), p.approvals.map { it.id })
         assertEquals("Please approve", p.text)
     }
+
+    @Test
+    fun approvalsCarryWaitingFlag() {
+        val a = parseApprovals("""{"pending":[{"id":"aa11bb22","what":"pc run x","status":"pending","waiting":true},{"id":"cc33dd44","what":"y","status":"pending"}]}""")
+        assertEquals(listOf(true, false), a.map { it.waiting })
+    }
 }

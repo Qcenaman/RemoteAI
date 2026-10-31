@@ -6,6 +6,8 @@ import com.qcenaman.remoteai.data.SettingsStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -27,6 +29,7 @@ class ControllerTest {
     @Volatile private var lmCode = 200
     @Volatile private var apCode = 200
     @Volatile private var sse: String? = null
+    @Volatile private var chatDelayMs = 0L
     @Volatile private var chatReply = """{"output":[{"type":"message","content":"done"}],"response_id":"resp_2"}"""
 
     private class FakeSettings(var s: Settings) : SettingsStore {
@@ -46,6 +49,7 @@ class ControllerTest {
                         )
                         "/api/v1/chat" -> {
                             chatBodies += request.body.readUtf8()
+                            if (chatDelayMs > 0) Thread.sleep(chatDelayMs)
                             sse?.let { MockResponse().setHeader("Content-Type", "text/event-stream").setBody(it) }
                                 ?: MockResponse().setBody(chatReply)
                         }
@@ -192,5 +196,39 @@ class ControllerTest {
         val body = chatBodies.single()
         assertTrue(body.contains("confirm:\\\"abcd1234\\\""))
         assertTrue(body.contains("del x"))
+    }
+
+    private val waitingPending = """{"pending":[{"id":"abcd1234","what":"pc run: gradle build","status":"pending","waiting":true}]}"""
+
+    private suspend fun approveWhileReplyIsOpen(c: ChatController) = coroutineScope {
+        val reply = async(Dispatchers.IO) { c.send("build it") }
+        while (!c.state.value.busy) delay(10)
+        c.pollApprovals()
+        assertTrue(c.state.value.pending.single().waiting)
+        c.approve("abcd1234")
+        reply.await()
+    }
+
+    @Test
+    fun waitingApprovalResumesInPlaceWithoutFollowUp() = runBlocking {
+        pending = waitingPending
+        chatDelayMs = 600
+        chatReply = """{"output":[{"type":"tool_call","tool":"pc","arguments":{"command":"gradle build"},"output":"BUILD SUCCESSFUL"},{"type":"message","content":"Built."}],"response_id":"resp_w"}"""
+        val c = controller()
+        approveWhileReplyIsOpen(c)
+        assertEquals("only the original turn went out", 1, chatBodies.size)
+        assertTrue(apLog.contains("POST /approvals/abcd1234/approve"))
+    }
+
+    @Test
+    fun waitThatFellBackStillGetsTheFollowUp() = runBlocking {
+        pending = waitingPending
+        chatDelayMs = 600
+        chatReply = """{"output":[{"type":"tool_call","tool":"pc","arguments":{"command":"gradle build"},"output":"APPROVAL abcd1234: run gradle build. Waiting for the user to approve it in RemoteAI; tell them. Once approved, call again with the same args plus confirm:\"abcd1234\"."}],"response_id":"resp_f"}"""
+        val c = controller()
+        approveWhileReplyIsOpen(c)
+        assertEquals(2, chatBodies.size)
+        assertTrue(chatBodies[1].contains("confirm:\\\"abcd1234\\\""))
+        assertTrue(chatBodies[1].contains("gradle build"))
     }
 }

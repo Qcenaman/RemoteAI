@@ -56,6 +56,9 @@ class ChatController(
     /** Per conversation: turns the model never saw complete, because the connection dropped. Sent along with the next message. */
     private val lost = mutableMapOf<String, MutableList<String>>()
 
+    /** Approved while their pc call was blocked on them: they resume in place, unless the call fell back first. */
+    private val approvedInPlace = mutableSetOf<String>()
+
     private val lm = lmFactory({ baseUrl(s.host, s.lmPort) }, { s.lmToken })
     private val approvalsApi = approvalFactory({ baseUrl(s.host, s.approvalPort) }, { s.approvalToken })
     private val tokenSaver = tokenSaverFactory({ baseUrl(s.host, s.tokenSaverPort) }, { s.tokenSaverToken })
@@ -150,6 +153,7 @@ class ChatController(
     suspend fun send(text: String) {
         val input = text.trim()
         if (input.isEmpty()) return
+        val retry = mutableListOf<String>()
         chatLock.withLock {
             saveConv { c ->
                 c.copy(
@@ -177,6 +181,8 @@ class ChatController(
                             val reply = lm.chat(st.model, sent, st.conversation.responseId)
                             lost.remove(convId)
                             saveReply(reply, st.model)
+                            // The 50 s wait ran out before the approval landed: the call fell back to "call again".
+                            reply.approvals.map { it.id }.filter { approvedInPlace.remove(it) }.forEach { retry += it }
                         } catch (e: ApiException.Network) {
                             val part = e.partial
                             val record = StringBuilder("My message: ").append(input)
@@ -201,6 +207,7 @@ class ChatController(
             }
         }
         pollApprovals()
+        for (id in retry) send("I approved $id.${approvalDetails(id)} Call the pc tool again with the same args plus confirm:\"$id\".")
     }
 
     private fun saveReply(reply: ChatReply, model: String) {
@@ -248,6 +255,8 @@ class ChatController(
         }
         if (!claimed) return // a second tap while the first is in flight sends nothing
         val details = approvalDetails(id)
+        val st0 = _state.value
+        val inPlace = st0.busy && st0.pending.any { it.id == id && it.waiting }
         var ok = false
         try {
             if (approve) approvalsApi.approve(id) else approvalsApi.deny(id)
@@ -261,6 +270,10 @@ class ChatController(
             _state.update { it.copy(deciding = it.deciding - id, pending = if (ok) it.pending.filter { a -> a.id != id } else it.pending) }
         }
         pollApprovals()
+        if (ok && inPlace) {
+            if (approve) approvedInPlace += id // the blocked call runs (or is refused) inside the current reply
+            return
+        }
         if (ok) {
             send(
                 if (approve) "I approved $id.$details Call the pc tool again with the same args plus confirm:\"$id\"."
