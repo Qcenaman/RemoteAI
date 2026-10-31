@@ -45,3 +45,15 @@ class ParsingTest {
         assertEquals("http://[fd7a:115c:a1e0::1]:1234", baseUrl("fd7a:115c:a1e0::1", 1234))
     }
 }
+
+class ProvisionTest {
+    @Test
+    fun fillsOnlyBlankTokens() {
+        val s = com.qcenaman.remoteai.data.Settings(lmToken = "keep")
+        val f = fillEmptyTokens(s, "new", " ap ", null)
+        assertEquals("keep", f.lmToken)
+        assertEquals("ap", f.approvalToken)
+        assertEquals("", f.tokenSaverToken)
+        assertEquals(s.host, f.host)
+    }
+}

@@ -31,7 +31,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        provision(intent)
         setContent { AppTheme { App(vm) } }
+    }
+
+    /** Lets the PC refill tokens after a reinstall (am start ... --es lmToken ...). Only fills empty fields. */
+    private fun provision(i: android.content.Intent?) {
+        val st = vm.state.value.settings
+        val filled = fillEmptyTokens(
+            st,
+            i?.getStringExtra("lmToken"),
+            i?.getStringExtra("approvalToken"),
+            i?.getStringExtra("tokenSaverToken"),
+        )
+        if (filled != st) vm.saveSettings(filled)
     }
 
     override fun onStart() {

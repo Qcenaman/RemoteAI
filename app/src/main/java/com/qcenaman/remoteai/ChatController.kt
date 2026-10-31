@@ -236,3 +236,10 @@ class ChatController(
         pollApprovals()
     }
 }
+
+/** Fills only blank token fields, so an outside launch can never overwrite tokens already set. */
+fun fillEmptyTokens(s: Settings, lm: String?, approval: String?, tokenSaver: String?): Settings = s.copy(
+    lmToken = s.lmToken.ifBlank { lm?.trim().orEmpty() },
+    approvalToken = s.approvalToken.ifBlank { approval?.trim().orEmpty() },
+    tokenSaverToken = s.tokenSaverToken.ifBlank { tokenSaver?.trim().orEmpty() },
+)
