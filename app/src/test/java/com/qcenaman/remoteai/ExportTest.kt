@@ -1,5 +1,6 @@
 package com.qcenaman.remoteai
 
+import com.qcenaman.remoteai.ui.conversationText
 import com.qcenaman.remoteai.ui.thinkingFileName
 import com.qcenaman.remoteai.ui.thinkingFileText
 import org.junit.Assert.assertEquals
