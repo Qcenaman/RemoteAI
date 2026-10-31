@@ -79,6 +79,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun deny(id: String) = viewModelScope.launch { controller.deny(id) }
     fun refresh() = viewModelScope.launch { controller.refreshModels(); controller.pollApprovals() }
     fun startLocalAI() = viewModelScope.launch { controller.startLocalAI() }
+    fun killLocalAI() = viewModelScope.launch { controller.killLocalAI() }
+    fun restartLocalAI() = viewModelScope.launch { controller.restartLocalAI() }
     fun chooseModel(key: String) = viewModelScope.launch { controller.chooseModel(key) }
     fun saveSettings(s: Settings) {
         controller.saveSettings(s)

@@ -102,7 +102,7 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
             Section("ContextSaver approvals")
             Field("Port", apPort, number = true) { apPort = it }
             Field("Approval token", apToken, secret = true) { apToken = it }
-            Section("TokenSaver link (optional, for Start Local AI)")
+            Section("TokenSaver link (optional, for Start / Kill / Restart Local AI)")
             Field("Port", tsPort, number = true) { tsPort = it }
             Field("Link token", tsToken, secret = true) { tsToken = it }
             Field("Start command", cmd) { cmd = it }
@@ -123,6 +123,7 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
                             startCommand = cmd.trim(),
                             maxReplyTokens = maxTokens.trim().toIntOrNull()?.coerceAtLeast(0) ?: s.maxReplyTokens,
                             stopThinkingMinutes = stopMin.trim().toIntOrNull()?.coerceAtLeast(0) ?: s.stopThinkingMinutes,
+                            lastModel = s.lastModel,
                         )
                     )
                 },

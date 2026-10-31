@@ -90,6 +90,8 @@ fun App(vm: MainViewModel) {
             onSettings = { screen = Screen.SETTINGS },
             onRefresh = { vm.refresh() },
             onStartLocalAI = { vm.startLocalAI() },
+            onKillLocalAI = { vm.killLocalAI() },
+            onRestartLocalAI = { vm.restartLocalAI() },
             onStop = { vm.controller.stop() },
             onRetry = { vm.retry(it) },
             onDismissStatus = { vm.dismissStatus() },

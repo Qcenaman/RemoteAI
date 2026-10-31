@@ -360,4 +360,100 @@ class ControllerTest {
         lmCode = 200
         ts.shutdown()
     }
+
+    @Test
+    fun killCommandIsAnEncodedScriptThatCoversEveryRunner() {
+        val cmd = com.qcenaman.remoteai.net.killCommand()
+        assertTrue(cmd.startsWith("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "))
+        val script = String(java.util.Base64.getDecoder().decode(cmd.substringAfterLast(' ')), Charsets.UTF_16LE)
+        listOf("lm studio", "lms", "llama-", "ollama", "koboldcpp", "taskkill /F /T", "\\.lmstudio").forEach {
+            assertTrue("missing $it", script.contains(it))
+        }
+        assertTrue(!script.contains("§") && !script.contains("python"))
+    }
+
+    @Test
+    fun killRunsElevatedAndFallsBackWithoutAdmin() = runBlocking {
+        val bodies = Collections.synchronizedList(mutableListOf<String>())
+        val ts = MockWebServer().apply {
+            enqueue(MockResponse().setBody("""{"result":{"isError":true,"content":[{"type":"text","text":"admin helper not running"}]}}"""))
+            enqueue(MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"Killed LM Studio x3"}]}}"""))
+            start()
+        }
+        val c = ChatController(
+            FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, tokenSaverPort = ts.port,
+                lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
+            MemoryConversationStore(),
+        )
+        c.refreshModels()
+        assertTrue(c.killLocalAI())
+        repeat(2) { bodies += ts.takeRequest().body.readUtf8() }
+        assertTrue(bodies[0].contains("\"elevated\":true") && bodies[0].contains("EncodedCommand"))
+        assertTrue(!bodies[1].contains("elevated"))
+        val st = c.state.value
+        assertTrue(st.startOutput.startsWith("Killed LM Studio x3"))
+        assertEquals("", st.model)
+        assertEquals(Link.OFFLINE, st.lm)
+        assertEquals("", st.pcAction)
+        ts.shutdown()
+    }
+
+    @Test
+    fun killWithoutTokenSaverTokenSaysWhatToAdd() = runBlocking {
+        val c = controller()
+        assertTrue(!c.killLocalAI())
+        assertTrue(c.state.value.startOutput.contains("TokenSaver link token"))
+    }
+
+    @Test
+    fun restartKillsStartsAndReloadsTheSelectedModel() = runBlocking {
+        val mcp = Collections.synchronizedList(mutableListOf<String>())
+        val loads = Collections.synchronizedList(mutableListOf<String>())
+        var up = true
+        var loaded = "gemma"
+        val pc = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                    "/mcp" -> {
+                        val b = request.body.readUtf8()
+                        mcp += b
+                        if (b.contains("EncodedCommand")) { up = false; loaded = "" } else up = true
+                        MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"ok"}]}}""")
+                    }
+                    "/api/v1/models" -> if (!up) MockResponse().setResponseCode(503) else MockResponse().setBody(
+                        """{"models":[
+                           {"type":"llm","key":"qwen/qwen3.6-27b","loaded_instances":${if (loaded == "qwen") "[{\"id\":\"qwen3.6-27b\"}]" else "[]"}},
+                           {"type":"llm","key":"google/gemma","loaded_instances":${if (loaded == "gemma") "[{\"id\":\"gemma\"}]" else "[]"}}]}"""
+                    )
+                    "/api/v1/models/load" -> {
+                        val b = request.body.readUtf8()
+                        loads += b
+                        loaded = if (b.contains("gemma")) "gemma" else "qwen"
+                        MockResponse().setBody(if (loaded == "gemma") """{"instance_id":"gemma"}""" else """{"instance_id":"qwen3.6-27b"}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            start()
+        }
+        val c = ChatController(
+            FakeSettings(Settings(host = "127.0.0.1", lmPort = pc.port, approvalPort = ap.port, tokenSaverPort = pc.port,
+                lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok", lastModel = "qwen/qwen3.6-27b")),
+            MemoryConversationStore(),
+            startWaitMs = 2_000, startPollMs = 50, restartGapMs = 0,
+        )
+        c.refreshModels()
+        assertEquals("gemma", c.state.value.model)
+        c.restartLocalAI()
+        assertEquals(2, mcp.size)
+        assertTrue(mcp[0].contains("EncodedCommand") && mcp[0].contains("\"elevated\":true"))
+        assertTrue(mcp[1].contains("contextsaver.exe") && !mcp[1].contains("elevated"))
+        assertEquals(listOf("""{"model":"google/gemma"}"""), loads.toList())
+        val st = c.state.value
+        assertEquals("gemma", st.model)
+        assertEquals("google/gemma", st.settings.lastModel)
+        assertEquals("", st.pcAction)
+        assertEquals("", st.startOutput)
+        pc.shutdown()
+    }
 }

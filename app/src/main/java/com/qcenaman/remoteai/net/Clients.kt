@@ -215,14 +215,15 @@ class ApprovalClient(
     }
 }
 
-/** TokenSaver's link (tokensaver serve): used only to start Local AI when LM Studio is down. */
+/** TokenSaver's link (tokensaver serve): starts, stops and restarts Local AI on the PC. */
 class TokenSaverClient(
     private val base: () -> String,
     private val token: () -> String,
     http: OkHttpClient = defaultHttp(200),
 ) : HttpBase("TokenSaver", http) {
 
-    suspend fun run(command: String): String {
+    /** elevated runs it through TokenSaver's admin helper. */
+    suspend fun run(command: String, elevated: Boolean = false): String {
         val body = buildJsonObject {
             put("jsonrpc", "2.0")
             put("id", 1)
@@ -233,6 +234,7 @@ class TokenSaverClient(
                     put("command", command)
                     put("wait_seconds", 150)
                     put("tail", 8)
+                    if (elevated) put("elevated", true)
                 }
             }
         }.toString()

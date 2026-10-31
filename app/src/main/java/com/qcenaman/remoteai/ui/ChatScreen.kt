@@ -34,10 +34,13 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -95,6 +98,8 @@ fun ChatScreen(
     onSettings: () -> Unit,
     onRefresh: () -> Unit,
     onStartLocalAI: () -> Unit,
+    onKillLocalAI: () -> Unit,
+    onRestartLocalAI: () -> Unit,
     onStop: () -> Unit,
     onRetry: (String) -> Unit,
     onDismissStatus: () -> Unit,
@@ -121,7 +126,7 @@ fun ChatScreen(
                 .fillMaxSize()
                 .imePadding()
         ) {
-            ModelRow(st, onModel, onRefresh)
+            ModelRow(st, onModel, onRefresh, onKillLocalAI, onRestartLocalAI)
             StatusBanner(st, onRefresh, onStartLocalAI, onSettings, onDismissStatus)
             st.pending.forEach { a -> ApprovalCard(a, a.id in st.deciding, onApprove, onDeny) }
 
@@ -159,8 +164,16 @@ fun ChatScreen(
 
 /** The model button: shows what's loaded on the PC; tapping it lists every model there, and picking one loads it. */
 @Composable
-private fun ModelRow(st: UiState, onModel: (String) -> Unit, onRefresh: () -> Unit) {
+private fun ModelRow(
+    st: UiState,
+    onModel: (String) -> Unit,
+    onRefresh: () -> Unit,
+    onKill: () -> Unit,
+    onRestart: () -> Unit,
+) {
     var open by remember { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf<String?>(null) }
+    val pcBusy = st.pcAction.isNotBlank() || st.starting
     val current = st.models.firstOrNull { it.id == st.model }
     val busyLoading = st.loadingModel.isNotBlank()
     Row(
@@ -170,7 +183,7 @@ private fun ModelRow(st: UiState, onModel: (String) -> Unit, onRefresh: () -> Un
         Box {
             AssistChip(
                 onClick = { onRefresh(); open = true },
-                enabled = !busyLoading && !st.busy,
+                enabled = !busyLoading && !st.busy && !pcBusy,
                 leadingIcon = {
                     if (busyLoading) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                     else Icon(Icons.Default.Memory, null, Modifier.size(18.dp))
@@ -225,7 +238,34 @@ private fun ModelRow(st: UiState, onModel: (String) -> Unit, onRefresh: () -> Un
             }
         }
         Spacer(Modifier.weight(1f))
+        if (pcBusy) {
+            CircularProgressIndicator(Modifier.padding(horizontal = 12.dp).size(20.dp), strokeWidth = 2.dp)
+        } else {
+            IconButton(onClick = { confirm = "restart" }) { Icon(Icons.Default.RestartAlt, "Restart LM Studio and the model") }
+            IconButton(onClick = { confirm = "kill" }) {
+                Icon(Icons.Default.PowerSettingsNew, "Kill local AI", tint = MaterialTheme.colorScheme.error)
+            }
+        }
         IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "Refresh") }
+    }
+    val model = st.models.firstOrNull { it.id == st.model }?.label ?: st.model.ifBlank { st.settings.lastModel }
+    confirm?.let { what ->
+        val kill = what == "kill"
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(if (kill) "Kill local AI?" else "Restart local AI?") },
+            text = {
+                Text(
+                    if (kill) "Stops every local model on the PC (LM Studio, lms, llama.cpp, Ollama, KoboldCpp…) and closes LM Studio."
+                    else "Kills everything, starts LM Studio again and loads " +
+                        (if (model.isNotBlank()) model else "the last model used") + "."
+                )
+            },
+            confirmButton = {
+                Button(onClick = { confirm = null; if (kill) onKill() else onRestart() }) { Text(if (kill) "Kill" else "Restart") }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -247,13 +287,16 @@ private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit
     val tokenProblem = st.lm == Link.NO_TOKEN || st.lm == Link.BAD_TOKEN ||
         st.approvals == Link.NO_TOKEN || st.approvals == Link.BAD_TOKEN
     val canStart = st.lm == Link.OFFLINE || (st.lm == Link.OK && st.model.isBlank())
-    if (lmMsg.isBlank() && apMsg.isBlank() && st.startOutput.isBlank() && !st.starting) return
+    if (lmMsg.isBlank() && apMsg.isBlank() && st.startOutput.isBlank() && !st.starting && st.pcAction.isBlank()) return
     val errorText = listOf(lmMsg, apMsg, st.startOutput).filter { it.isNotBlank() }.joinToString("\n\n")
     Card(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (st.pcAction.isNotBlank()) {
+                Text(st.pcAction, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodyMedium)
+            }
             listOf(lmMsg, apMsg).filter { it.isNotBlank() }.forEach {
                 Text(it, color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodyMedium)
             }
@@ -264,7 +307,7 @@ private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (tokenProblem) TextButton(onClick = onSettings) { Text("Settings") }
                 TextButton(onClick = onRefresh) { Text("Retry") }
-                if (canStart || st.starting) {
+                if ((canStart || st.starting) && st.pcAction.isBlank()) {
                     Button(onClick = onStart, enabled = !st.starting && st.loadingModel.isBlank()) {
                         if (st.starting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         else Text("Start Local AI")
@@ -272,7 +315,7 @@ private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit
                 }
                 Spacer(Modifier.weight(1f))
                 if (errorText.isNotBlank()) CopyButton(errorText, "Error copied", MaterialTheme.colorScheme.onErrorContainer)
-                if (st.startOutput.isNotBlank() && !st.starting) {
+                if (st.startOutput.isNotBlank() && !st.starting && st.pcAction.isBlank()) {
                     IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
                         Icon(Icons.Default.Close, "Close", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
                     }

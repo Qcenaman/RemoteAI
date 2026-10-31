@@ -17,6 +17,7 @@ import com.qcenaman.remoteai.net.StopReason
 import com.qcenaman.remoteai.net.Watchdog
 import com.qcenaman.remoteai.net.TokenSaverClient
 import com.qcenaman.remoteai.net.baseUrl
+import com.qcenaman.remoteai.net.killCommand
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -42,6 +43,8 @@ data class UiState(
     val startOutput: String = "",
     /** Model being loaded on the PC (label), blank when none. */
     val loadingModel: String = "",
+    /** Kill or restart in progress on the PC ("Killing local AI…"), blank when none. */
+    val pcAction: String = "",
 )
 
 fun newConv() = Conversation(UUID.randomUUID().toString(), "New chat", System.currentTimeMillis())
@@ -57,6 +60,8 @@ class ChatController(
     /** How long Start Local AI waits for LM Studio to answer after starting it. */
     private val startWaitMs: Long = 90_000,
     private val startPollMs: Long = 3_000,
+    /** Pause between killing and starting again, so the GPU memory is really free. */
+    private val restartGapMs: Long = 3_000,
 ) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -423,6 +428,68 @@ class ChatController(
         } finally {
             _state.update { it.copy(starting = false) }
             pollApprovals()
+        }
+    }
+
+    /**
+     * Kill button: ends every local model and LM Studio on the PC, however they were started.
+     * Goes through TokenSaver (elevated), so it works even when LM Studio is hung or not answering.
+     */
+    suspend fun killLocalAI(): Boolean {
+        _state.update { it.copy(pcAction = "Killing local AI on the PC…", startOutput = "") }
+        return try {
+            kill()
+        } finally {
+            _state.update { it.copy(pcAction = "") }
+        }
+    }
+
+    private suspend fun kill(): Boolean {
+        if (s.tokenSaverToken.isBlank()) {
+            _state.update { it.copy(startOutput = "Add the TokenSaver link token in Settings to kill or restart Local AI from here.") }
+            return false
+        }
+        if (_state.value.busy) lm.cancel() // the reply in progress ends as stopped, not as a dropped connection
+        val out = try {
+            runElevated(killCommand())
+        } catch (e: ApiException) {
+            _state.update { it.copy(startOutput = "Couldn't kill Local AI: ${e.message}") }
+            return false
+        }
+        _state.update {
+            it.copy(
+                startOutput = out.trim().takeLast(600).ifBlank { "Local AI killed." },
+                models = it.models.map { m -> m.copy(loaded = false) },
+                model = "",
+                lm = Link.OFFLINE,
+                lmMessage = "",
+            )
+        }
+        return true
+    }
+
+    /** Through the admin helper; if that isn't available, runs it normally so the button still does its job. */
+    private suspend fun runElevated(command: String): String = try {
+        tokenSaver.run(command, elevated = true)
+    } catch (e: ApiException.Http) {
+        tokenSaver.run(command) + "\n(ran without admin: ${e.message?.take(120)})"
+    }
+
+    /** Restart button: kills everything, starts LM Studio again and loads the model that was selected. */
+    suspend fun restartLocalAI() {
+        val st = _state.value
+        val key = st.models.firstOrNull { it.id == st.model }?.key ?: st.model.ifBlank { null } ?: preferredModel()
+        _state.update { it.copy(pcAction = "Restarting local AI on the PC…", startOutput = "") }
+        try {
+            if (!kill()) return
+            if (key != null) rememberModel(key) // Start Local AI loads the last model used
+            kotlinx.coroutines.delay(restartGapMs)
+            startLocalAI()
+            // LM Studio may have auto-loaded something else at startup: switch to the selected model.
+            val now = _state.value
+            if (key != null && now.lm == Link.OK && now.models.none { (it.key == key || it.id == key) && it.loaded }) chooseModel(key)
+        } finally {
+            _state.update { it.copy(pcAction = "") }
         }
     }
 
