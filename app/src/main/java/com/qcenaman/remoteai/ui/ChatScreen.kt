@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.History
@@ -91,6 +92,7 @@ fun ChatScreen(
     onStartLocalAI: () -> Unit,
     onStop: () -> Unit,
     onRetry: (String) -> Unit,
+    onDismissStatus: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -111,7 +113,7 @@ fun ChatScreen(
                 .imePadding()
         ) {
             ModelRow(st, onModel, onRefresh)
-            StatusBanner(st, onRefresh, onStartLocalAI, onSettings)
+            StatusBanner(st, onRefresh, onStartLocalAI, onSettings, onDismissStatus)
             st.pending.forEach { a -> ApprovalCard(a, a.id in st.deciding, onApprove, onDeny) }
 
             val list = rememberLazyListState()
@@ -178,7 +180,7 @@ private fun ModelRow(st: UiState, onModel: (String) -> Unit, onRefresh: () -> Un
 }
 
 @Composable
-private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit, onSettings: () -> Unit) {
+private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) {
     val lmMsg = when (st.lm) {
         Link.NO_TOKEN -> "LM Studio token missing."
         Link.BAD_TOKEN -> "LM Studio token wrong or missing."
@@ -196,6 +198,7 @@ private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit
         st.approvals == Link.NO_TOKEN || st.approvals == Link.BAD_TOKEN
     val canStart = st.lm == Link.OFFLINE || (st.lm == Link.OK && st.model.isBlank())
     if (lmMsg.isBlank() && apMsg.isBlank() && st.startOutput.isBlank() && !st.starting) return
+    val errorText = listOf(lmMsg, apMsg, st.startOutput).filter { it.isNotBlank() }.joinToString("\n\n")
     Card(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
@@ -215,6 +218,13 @@ private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit
                     Button(onClick = onStart, enabled = !st.starting) {
                         if (st.starting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         else Text("Start Local AI")
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                if (errorText.isNotBlank()) CopyButton(errorText, "Error copied", MaterialTheme.colorScheme.onErrorContainer)
+                if (st.startOutput.isNotBlank() && !st.starting) {
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Close, "Close", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
                     }
                 }
             }
@@ -270,12 +280,15 @@ private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?
         }
         "tool" -> ToolView(item)
         else -> Column {
-            Text(
-                item.text,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(4.dp),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    item.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f).padding(4.dp),
+                )
+                CopyButton(item.text, "Error copied", MaterialTheme.colorScheme.error)
+            }
             if (onRetry != null && item.retry.isNotBlank()) {
                 OutlinedButton(onClick = { onRetry(item.retry) }, modifier = Modifier.padding(start = 4.dp)) {
                     Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
@@ -284,6 +297,19 @@ private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?
                 }
             }
         }
+    }
+}
+
+/** Copies text so it can be pasted elsewhere, instead of taking a screenshot. */
+@Composable
+private fun CopyButton(text: String, toast: String, tint: androidx.compose.ui.graphics.Color) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    IconButton(onClick = {
+        clipboard.setText(AnnotatedString(text.trim()))
+        Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
+    }, modifier = Modifier.size(36.dp)) {
+        Icon(Icons.Default.ContentCopy, "Copy", Modifier.size(18.dp), tint = tint)
     }
 }
 

@@ -345,6 +345,14 @@ class ChatController(
         _state.update { it.copy(starting = false, startOutput = out.trim().takeLast(600)) }
         refreshModels()
         pollApprovals()
+        // Started fine: nothing to report, so the card goes away. Kept (in red) only when something is still wrong.
+        val st = _state.value
+        if (st.lm == Link.OK && st.model.isNotBlank()) _state.update { it.copy(startOutput = "") }
+    }
+
+    /** The close button on the status card. */
+    fun dismissStartOutput() {
+        _state.update { it.copy(startOutput = "") }
     }
 }
 

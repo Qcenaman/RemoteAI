@@ -303,4 +303,27 @@ class ControllerTest {
         assertTrue(chatBodies[1].contains("confirm:\\\"abcd1234\\\""))
         assertTrue(chatBodies[1].contains("gradle build"))
     }
+
+    @Test
+    fun startLocalAIHidesOutputOnceTheModelIsUp() = runBlocking {
+        val ts = MockWebServer().apply {
+            enqueue(MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"LM Studio server on; qwen loaded"}]}}"""))
+            enqueue(MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"LM Studio failed to start"}]}}"""))
+            start()
+        }
+        val c = ChatController(
+            FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, tokenSaverPort = ts.port,
+                lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
+            MemoryConversationStore(),
+        )
+        c.startLocalAI()
+        assertEquals("", c.state.value.startOutput)
+
+        lmCode = 503 // still down after starting: the output stays, so it can be copied
+        c.startLocalAI()
+        assertEquals("LM Studio failed to start", c.state.value.startOutput)
+        c.dismissStartOutput()
+        assertEquals("", c.state.value.startOutput)
+        ts.shutdown()
+    }
 }

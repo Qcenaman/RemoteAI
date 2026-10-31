@@ -74,6 +74,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun send(text: String) = viewModelScope.launch { controller.send(text) }
     fun retry(text: String) = viewModelScope.launch { controller.retry(text) }
+    fun dismissStatus() = controller.dismissStartOutput()
     fun approve(id: String) = viewModelScope.launch { controller.approve(id) }
     fun deny(id: String) = viewModelScope.launch { controller.deny(id) }
     fun refresh() = viewModelScope.launch { controller.refreshModels(); controller.pollApprovals() }

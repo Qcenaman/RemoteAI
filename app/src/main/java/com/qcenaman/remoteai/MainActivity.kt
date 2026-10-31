@@ -92,6 +92,7 @@ fun App(vm: MainViewModel) {
             onStartLocalAI = { vm.startLocalAI() },
             onStop = { vm.controller.stop() },
             onRetry = { vm.retry(it) },
+            onDismissStatus = { vm.dismissStatus() },
         )
         Screen.CONVERSATIONS -> ConversationsScreen(
             st = st,
