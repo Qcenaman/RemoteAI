@@ -26,6 +26,7 @@ class ControllerTest {
     @Volatile private var pending = """{"pending":[{"id":"abcd1234","what":"pc run: del C:\\tmp\\x","created":"","expires":"","status":"pending"}]}"""
     @Volatile private var lmCode = 200
     @Volatile private var apCode = 200
+    @Volatile private var sse: String? = null
     @Volatile private var chatReply = """{"output":[{"type":"message","content":"done"}],"response_id":"resp_2"}"""
 
     private class FakeSettings(var s: Settings) : SettingsStore {
@@ -45,7 +46,8 @@ class ControllerTest {
                         )
                         "/api/v1/chat" -> {
                             chatBodies += request.body.readUtf8()
-                            MockResponse().setBody(chatReply)
+                            sse?.let { MockResponse().setHeader("Content-Type", "text/event-stream").setBody(it) }
+                                ?: MockResponse().setBody(chatReply)
                         }
                         else -> MockResponse().setResponseCode(404)
                     }
@@ -152,5 +154,43 @@ class ControllerTest {
         assertTrue(chatBodies[1].contains("\"previous_response_id\":\"resp_2\""))
         assertTrue(chatBodies[0].contains("mcp/contextsaver"))
         assertEquals("qwen3.6-27b", c.state.value.model)
+    }
+
+    @Test
+    fun droppedStreamKeepsPartialAndTellsModelNextTime() = runBlocking {
+        sse = listOf(
+            "event: tool_call.success",
+            """data: {"type":"tool_call.success","tool":"pc","arguments":{"c":"run","command":"gradle build"},"output":"APPROVAL de7d0534: run gradle build. Waiting for the user to approve it in RemoteAI."}""",
+            "",
+        ).joinToString("\n") + "\n" // no chat.end: the connection broke off
+        val c = controller()
+        c.send("build my app")
+        val items = c.state.value.conversation.items
+        assertTrue(items.any { it.role == "tool" && it.args.contains("gradle build") })
+        assertEquals(listOf("de7d0534"), c.state.value.pending.map { it.id })
+        assertEquals(Link.OFFLINE, c.state.value.lm)
+
+        sse = null
+        chatBodies.clear()
+        c.send("go on")
+        val body = chatBodies.single()
+        assertTrue(body.contains("build my app"))
+        assertTrue(body.contains("gradle build"))
+        assertTrue(body.contains("go on"))
+        chatBodies.clear()
+        c.send("again")
+        assertTrue("context is sent once", !chatBodies.single().contains("build my app"))
+    }
+
+    @Test
+    fun approvalMessageCarriesOriginalArgs() = runBlocking {
+        chatReply = """{"output":[{"type":"tool_call","tool":"pc","arguments":{"command":"del x"},"output":"APPROVAL abcd1234: run del x. Waiting for the user to approve it in RemoteAI."}],"response_id":"resp_a"}"""
+        val c = controller()
+        c.send("delete x")
+        chatBodies.clear()
+        c.approve("abcd1234")
+        val body = chatBodies.single()
+        assertTrue(body.contains("confirm:\\\"abcd1234\\\""))
+        assertTrue(body.contains("del x"))
     }
 }

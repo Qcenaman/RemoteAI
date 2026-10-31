@@ -8,6 +8,7 @@ import com.qcenaman.remoteai.data.SettingsStore
 import com.qcenaman.remoteai.net.ApiException
 import com.qcenaman.remoteai.net.Approval
 import com.qcenaman.remoteai.net.ApprovalClient
+import com.qcenaman.remoteai.net.ChatReply
 import com.qcenaman.remoteai.net.LmStudioClient
 import com.qcenaman.remoteai.net.ModelInfo
 import com.qcenaman.remoteai.net.TokenSaverClient
@@ -51,6 +52,9 @@ class ChatController(
     val state: StateFlow<UiState> = _state
     private val s get() = _state.value.settings
     private val chatLock = Mutex()
+
+    /** Per conversation: turns the model never saw complete, because the connection dropped. Sent along with the next message. */
+    private val lost = mutableMapOf<String, MutableList<String>>()
 
     private val lm = lmFactory({ baseUrl(s.host, s.lmPort) }, { s.lmToken })
     private val approvalsApi = approvalFactory({ baseUrl(s.host, s.approvalPort) }, { s.approvalToken })
@@ -160,33 +164,77 @@ class ChatController(
                 when {
                     st.lm == Link.NO_TOKEN -> note("Add the LM Studio token in Settings.")
                     st.lm == Link.BAD_TOKEN -> note("LM Studio rejected the token. Check it in Settings.")
-                    st.lm != Link.OK -> note(st.lmMessage.ifBlank { "Can't reach LM Studio." })
+                    st.lm != Link.OK -> {
+                        remember(st.conversation.id, "My message: $input")
+                        note(st.lmMessage.ifBlank { "Can't reach LM Studio." })
+                    }
                     st.model.isBlank() -> note("No model is loaded on the PC. Tap Start Local AI.")
                     else -> {
-                        val reply = lm.chat(st.model, input, st.conversation.responseId)
-                        if (reply.approvals.isNotEmpty()) {
-                            _state.update { u -> u.copy(pending = (u.pending + reply.approvals).distinctBy { a -> a.id }) }
-                        }
-                        saveConv { c ->
-                            val tools = reply.toolCalls.map { ChatItem("tool", it.output, tool = it.tool, args = it.arguments) }
-                            val answer = if (reply.text.isNotBlank() || reply.reasoning.isNotBlank())
-                                listOf(ChatItem("assistant", reply.text, reasoning = reply.reasoning)) else emptyList()
-                            c.copy(
-                                items = c.items + tools + answer,
-                                responseId = reply.responseId ?: c.responseId,
-                                model = st.model,
-                            )
+                        val convId = st.conversation.id
+                        val missed = lost[convId].orEmpty()
+                        val sent = if (missed.isEmpty()) input else lostContext(missed) + input
+                        try {
+                            val reply = lm.chat(st.model, sent, st.conversation.responseId)
+                            lost.remove(convId)
+                            saveReply(reply, st.model)
+                        } catch (e: ApiException.Network) {
+                            val part = e.partial
+                            val record = StringBuilder("My message: ").append(input)
+                            if (part != null) {
+                                saveReply(part, st.model)
+                                part.toolCalls.forEach { record.append("\nYou called ${it.tool} ${it.arguments} → ${it.output.take(300)}") }
+                                if (part.text.isNotBlank()) record.append("\nYou had started replying: ${part.text.take(300)}")
+                            }
+                            remember(convId, record.toString())
+                            throw e
                         }
                     }
                 }
             } catch (e: ApiException) {
                 _state.update { it.copy(lm = linkFor(e), lmMessage = e.message ?: "") }
-                note(e.message ?: "Request failed")
+                note(
+                    if (e is ApiException.Network && e.partial != null) "Connection dropped mid-reply (${e.message}). What arrived is kept; your next message tells the model what it missed."
+                    else e.message ?: "Request failed"
+                )
             } finally {
                 _state.update { it.copy(busy = false) }
             }
         }
         pollApprovals()
+    }
+
+    private fun saveReply(reply: ChatReply, model: String) {
+        if (reply.approvals.isNotEmpty()) {
+            _state.update { u -> u.copy(pending = (u.pending + reply.approvals).distinctBy { a -> a.id }) }
+        }
+        saveConv { c ->
+            val tools = reply.toolCalls.map { ChatItem("tool", it.output, tool = it.tool, args = it.arguments) }
+            val answer = if (reply.text.isNotBlank() || reply.reasoning.isNotBlank())
+                listOf(ChatItem("assistant", reply.text, reasoning = reply.reasoning)) else emptyList()
+            c.copy(
+                items = c.items + tools + answer,
+                responseId = reply.responseId ?: c.responseId,
+                model = model,
+            )
+        }
+    }
+
+    private fun remember(convId: String, turn: String) {
+        val list = lost.getOrPut(convId) { mutableListOf() }
+        if (list.size >= 5) list.removeAt(0)
+        list += turn
+    }
+
+    private fun lostContext(missed: List<String>) =
+        "[The connection dropped, so you never saw these earlier turns complete:\n" +
+            missed.joinToString("\n---\n") + "\n]\n\n"
+
+    /** The pc call an approval belongs to, so the retry message works even if the model lost that turn. */
+    private fun approvalDetails(id: String): String {
+        val call = _state.value.conversation.items.lastOrNull { it.role == "tool" && it.text.contains(id, ignoreCase = true) }
+        if (call != null && call.args.isNotBlank()) return " The original call was ${call.tool} ${call.args}."
+        val what = _state.value.pending.firstOrNull { it.id == id }?.what.orEmpty()
+        return if (what.isNotBlank()) " It was: $what." else ""
     }
 
     suspend fun approve(id: String) = decide(id, approve = true)
@@ -199,6 +247,7 @@ class ChatController(
             if (claimed) it.copy(deciding = it.deciding + id) else it
         }
         if (!claimed) return // a second tap while the first is in flight sends nothing
+        val details = approvalDetails(id)
         var ok = false
         try {
             if (approve) approvalsApi.approve(id) else approvalsApi.deny(id)
@@ -214,8 +263,8 @@ class ChatController(
         pollApprovals()
         if (ok) {
             send(
-                if (approve) "I approved $id. Call the pc tool again with the same args plus confirm:\"$id\"."
-                else "I denied $id. Don't retry it."
+                if (approve) "I approved $id.$details Call the pc tool again with the same args plus confirm:\"$id\"."
+                else "I denied $id.$details Don't retry it."
             )
         }
     }

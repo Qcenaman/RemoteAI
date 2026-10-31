@@ -8,6 +8,8 @@ import com.qcenaman.remoteai.data.FileConversationStore
 import com.qcenaman.remoteai.data.Settings
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
@@ -19,6 +21,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     )
     val state = controller.state
     private var poller: Job? = null
+
+    init {
+        // While a reply is on its way, a foreground service keeps the request alive with the screen off.
+        viewModelScope.launch {
+            state.map { it.busy }.distinctUntilChanged().collect { busy ->
+                if (busy) KeepAliveService.start(app) else KeepAliveService.stop(app)
+            }
+        }
+    }
+
+    override fun onCleared() {
+        KeepAliveService.stop(getApplication())
+        super.onCleared()
+    }
 
     /** Polls the approval server while the app is in front: fast while a reply or approval is open. */
     fun onForeground() {

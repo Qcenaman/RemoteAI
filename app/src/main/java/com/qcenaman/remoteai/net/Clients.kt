@@ -11,13 +11,20 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import kotlinx.coroutines.delay
 import java.io.IOException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 sealed class ApiException(message: String) : Exception(message) {
     class Unauthorized(val server: String) : ApiException("$server: token wrong or missing")
     class Http(val server: String, val code: Int, body: String) : ApiException("$server: HTTP $code ${body.take(300)}")
-    class Network(val server: String, cause: IOException) : ApiException("$server unreachable: ${cause.message ?: cause.javaClass.simpleName}")
+    /** partial: what a streamed reply had produced before the connection dropped. */
+    class Network(val server: String, cause: IOException, val partial: ChatReply? = null) :
+        ApiException("$server unreachable: ${cause.message ?: cause.javaClass.simpleName}")
     class NotFound(val server: String) : ApiException("$server: not found")
 }
 
@@ -29,21 +36,47 @@ fun baseUrl(host: String, port: Int): String {
     return "http://$bracketed:$port"
 }
 
-open class HttpBase(protected val server: String, protected val http: OkHttpClient) {
-    protected suspend fun call(req: Request): String = withContext(Dispatchers.IO) {
-        try {
-            http.newCall(req).execute().use { r ->
-                val body = r.body?.string() ?: ""
-                when {
-                    r.code == 401 -> throw ApiException.Unauthorized(server)
-                    r.code == 404 -> throw ApiException.NotFound(server)
-                    !r.isSuccessful -> throw ApiException.Http(server, r.code, body)
-                    else -> body
-                }
+/** True when the request never reached the server, so sending it again can't run anything twice. */
+fun isConnectFailure(e: IOException): Boolean =
+    e is ConnectException || e is NoRouteToHostException || e is UnknownHostException ||
+        (e is SocketTimeoutException && e.message.orEmpty().contains("connect", ignoreCase = true))
+
+open class HttpBase(
+    protected val server: String,
+    protected val http: OkHttpClient,
+    private val retryDelaysMs: List<Long> = listOf(2_000, 5_000),
+) {
+    /** Runs block, retrying with backoff only while the connection itself can't be made (e.g. Tailscale waking up). */
+    protected suspend fun <T> withConnectRetry(block: () -> T): T = withContext(Dispatchers.IO) {
+        var attempt = 0
+        while (true) {
+            try {
+                return@withContext block()
+            } catch (e: IOException) {
+                if (!isConnectFailure(e) || attempt >= retryDelaysMs.size) throw e
+                delay(retryDelaysMs[attempt++])
             }
-        } catch (e: IOException) {
-            throw ApiException.Network(server, e)
         }
+        @Suppress("UNREACHABLE_CODE") error("unreachable")
+    }
+
+    protected fun checkStatus(r: okhttp3.Response) {
+        when {
+            r.code == 401 -> throw ApiException.Unauthorized(server)
+            r.code == 404 -> throw ApiException.NotFound(server)
+            !r.isSuccessful -> throw ApiException.Http(server, r.code, r.body?.string() ?: "")
+        }
+    }
+
+    protected suspend fun call(req: Request): String = try {
+        withConnectRetry {
+            http.newCall(req).execute().use { r ->
+                checkStatus(r)
+                r.body?.string() ?: ""
+            }
+        }
+    } catch (e: IOException) {
+        throw ApiException.Network(server, e)
     }
 
     protected fun Request.Builder.auth(token: String): Request.Builder =
@@ -51,7 +84,7 @@ open class HttpBase(protected val server: String, protected val http: OkHttpClie
 }
 
 fun defaultHttp(readSeconds: Long): OkHttpClient = OkHttpClient.Builder()
-    .connectTimeout(8, TimeUnit.SECONDS)
+    .connectTimeout(20, TimeUnit.SECONDS)
     .readTimeout(readSeconds, TimeUnit.SECONDS)
     .writeTimeout(30, TimeUnit.SECONDS)
     .build()
@@ -61,7 +94,8 @@ class LmStudioClient(
     private val base: () -> String,
     private val token: () -> String,
     http: OkHttpClient = defaultHttp(900),
-) : HttpBase("LM Studio", http) {
+    retryDelaysMs: List<Long> = listOf(2_000, 5_000),
+) : HttpBase("LM Studio", http, retryDelaysMs) {
 
     suspend fun models(): List<ModelInfo> =
         parseModels(call(Request.Builder().url(base() + "/api/v0/models").auth(token()).get().build()))
@@ -71,11 +105,31 @@ class LmStudioClient(
             put("model", model)
             put("input", input)
             put("integrations", JsonArray(listOf(JsonPrimitive("mcp/contextsaver"))))
+            put("stream", true)
             if (!previousResponseId.isNullOrBlank()) put("previous_response_id", previousResponseId)
         }.toString()
         val req = Request.Builder().url(base() + "/api/v1/chat").auth(token())
             .post(body.toRequestBody(jsonType)).build()
-        return parseChat(call(req))
+        val stream = ChatStream()
+        return try {
+            withConnectRetry {
+                http.newCall(req).execute().use { r ->
+                    checkStatus(r)
+                    val b = r.body ?: return@use parseChat("{}")
+                    if (b.contentType()?.subtype != "event-stream") return@use parseChat(b.string())
+                    val src = b.source()
+                    while (stream.result == null) {
+                        val line = src.readUtf8Line() ?: break
+                        stream.feedLine(line)
+                    }
+                    stream.finish()
+                    stream.error?.let { throw ApiException.Http(server, 200, it) }
+                    stream.result ?: throw IOException("stream ended before chat.end")
+                }
+            }
+        } catch (e: IOException) {
+            throw ApiException.Network(server, e, stream.partial().takeIf { stream.started })
+        }
     }
 }
 

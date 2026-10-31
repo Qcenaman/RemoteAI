@@ -115,3 +115,65 @@ fun parseMcpText(body: String): Pair<String, Boolean> {
     val isError = (res["isError"] as? JsonPrimitive)?.contentOrNull == "true"
     return text to isError
 }
+
+/** Collects a streamed POST /api/v1/chat (SSE), so a reply cut off mid-way still keeps what it had produced. */
+class ChatStream {
+    private val text = StringBuilder()
+    private val reasoning = StringBuilder()
+    private val calls = mutableListOf<ToolCall>()
+    private var event = ""
+    private val data = StringBuilder()
+    var started = false
+        private set
+    var result: ChatReply? = null
+        private set
+    var error: String? = null
+        private set
+
+    fun feedLine(line: String) {
+        when {
+            line.isEmpty() -> finish()
+            line.startsWith(":") -> Unit
+            line.startsWith("event:") -> event = line.removePrefix("event:").trim()
+            line.startsWith("data:") -> {
+                if (data.isNotEmpty()) data.append('\n')
+                data.append(line.removePrefix("data:").removePrefix(" "))
+            }
+        }
+    }
+
+    /** Dispatches the event collected so far (also called at the end of the stream). */
+    fun finish() {
+        if (data.isEmpty()) return
+        val raw = data.toString()
+        data.clear()
+        val name = event
+        event = ""
+        val o = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return
+        started = true
+        when ((o["type"] as? JsonPrimitive)?.contentOrNull ?: name) {
+            "message.start" -> if (text.isNotEmpty()) text.append("\n\n")
+            "message.delta" -> text.append(o["content"].str())
+            "reasoning.delta" -> reasoning.append(o["content"].str())
+            "tool_call.success" -> calls += ToolCall(o["tool"].str(), o["arguments"].pretty(), o["output"].str())
+            "tool_call.failure" -> {
+                val meta = o["metadata"] as? JsonObject
+                calls += ToolCall(meta?.get("tool_name").str(), meta?.get("arguments").pretty(), "Failed: " + o["reason"].str())
+            }
+            "error" -> error = (o["error"] as? JsonObject)?.get("message").str().ifBlank { raw }
+            "chat.end" -> result = parseChat((o["result"] as? JsonObject)?.toString() ?: "{}")
+        }
+    }
+
+    /** What arrived before the stream broke off. */
+    fun partial(): ChatReply {
+        val t = text.toString().trim()
+        return ChatReply(
+            text = t,
+            reasoning = reasoning.toString().trim(),
+            toolCalls = calls.toList(),
+            responseId = null,
+            approvals = (calls.flatMap { findApprovals(it.output) } + findApprovals(t)).distinctBy { it.id },
+        )
+    }
+}

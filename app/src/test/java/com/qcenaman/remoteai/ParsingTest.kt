@@ -1,5 +1,6 @@
 package com.qcenaman.remoteai
 
+import com.qcenaman.remoteai.net.ChatStream
 import com.qcenaman.remoteai.net.baseUrl
 import com.qcenaman.remoteai.net.parseApprovals
 import com.qcenaman.remoteai.net.parseChat
@@ -55,5 +56,47 @@ class ProvisionTest {
         assertEquals("ap", f.approvalToken)
         assertEquals("", f.tokenSaverToken)
         assertEquals(s.host, f.host)
+    }
+
+    @Test
+    fun streamedReplyEndsWithFullResult() {
+        val st = ChatStream()
+        """
+            event: chat.start
+            data: {"type":"chat.start","model_instance_id":"q"}
+
+            event: message.delta
+            data: {"type":"message.delta","content":"Hel"}
+
+            : keep-alive
+            event: message.delta
+            data: {"type":"message.delta","content":"lo"}
+
+            event: chat.end
+            data: {"type":"chat.end","result":{"output":[{"type":"message","content":"Hello"}],"response_id":"resp_s"}}
+
+        """.trimIndent().lines().forEach(st::feedLine)
+        assertEquals("Hello", st.result!!.text)
+        assertEquals("resp_s", st.result!!.responseId)
+        assertEquals("Hello", st.partial().text)
+    }
+
+    @Test
+    fun cutOffStreamKeepsToolCallsAndApprovals() {
+        val st = ChatStream()
+        listOf(
+            "event: tool_call.success",
+            """data: {"type":"tool_call.success","tool":"pc","arguments":{"c":"run","command":"gradle build"},"output":"APPROVAL de7d0534: run gradle build. Waiting for the user to approve it."}""",
+            "",
+            "event: message.delta",
+            """data: {"type":"message.delta","content":"Please approve"}""",
+        ).forEach(st::feedLine)
+        st.finish()
+        assertEquals(null, st.result)
+        val p = st.partial()
+        assertEquals("pc", p.toolCalls.single().tool)
+        assertTrue(p.toolCalls.single().arguments.contains("gradle build"))
+        assertEquals(listOf("de7d0534"), p.approvals.map { it.id })
+        assertEquals("Please approve", p.text)
     }
 }
