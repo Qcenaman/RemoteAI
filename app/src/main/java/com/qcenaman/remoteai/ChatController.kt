@@ -11,6 +11,8 @@ import com.qcenaman.remoteai.net.ApprovalClient
 import com.qcenaman.remoteai.net.ChatReply
 import com.qcenaman.remoteai.net.LmStudioClient
 import com.qcenaman.remoteai.net.ModelInfo
+import com.qcenaman.remoteai.net.ReplyStats
+import com.qcenaman.remoteai.net.estimateTokens
 import com.qcenaman.remoteai.net.StopReason
 import com.qcenaman.remoteai.net.Watchdog
 import com.qcenaman.remoteai.net.TokenSaverClient
@@ -167,7 +169,7 @@ class ChatController(
             saveConv { c ->
                 c.copy(
                     title = if (c.items.isEmpty()) input.take(48) else c.title,
-                    items = c.items + ChatItem("user", input),
+                    items = c.items + ChatItem("user", input, stats = ReplyStats(promptTokens = estimateTokens(input), estimated = true)),
                 )
             }
             _state.update { it.copy(busy = true) }
@@ -250,13 +252,23 @@ class ChatController(
         if (reply.approvals.isNotEmpty()) {
             _state.update { u -> u.copy(pending = (u.pending + reply.approvals).distinctBy { a -> a.id }) }
         }
+        val ctxLen = _state.value.models.firstOrNull { it.id == model }?.contextLength ?: 0
+        val stats = reply.stats?.copy(contextLength = ctxLen)
         saveConv { c ->
             val tools = reply.toolCalls.map { ChatItem("tool", it.output, tool = it.tool, args = it.arguments) }
             val text = if (stopped) (reply.text + "\n\n*(stopped)*").trim() else reply.text
             val answer = if (stopped || reply.text.isNotBlank() || reply.reasoning.isNotBlank())
-                listOf(ChatItem("assistant", text, reasoning = reply.reasoning)) else emptyList()
+                listOf(ChatItem("assistant", text, reasoning = reply.reasoning, stats = stats)) else emptyList()
+            // The prompt's line shows how much context the model read for it.
+            val before = if (stats != null && stats.inputTokens > 0) {
+                val u = c.items.indexOfLast { it.role == "user" }
+                if (u < 0) c.items else c.items.toMutableList().also {
+                    val p = it[u].stats ?: ReplyStats()
+                    it[u] = it[u].copy(stats = p.copy(inputTokens = stats.inputTokens, contextLength = ctxLen))
+                }
+            } else c.items
             c.copy(
-                items = c.items + tools + answer,
+                items = before + tools + answer,
                 responseId = reply.responseId ?: c.responseId,
                 model = model,
             )

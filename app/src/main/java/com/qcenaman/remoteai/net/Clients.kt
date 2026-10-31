@@ -102,8 +102,18 @@ class LmStudioClient(
     retryDelaysMs: List<Long> = listOf(2_000, 5_000),
 ) : HttpBase("LM Studio", http, retryDelaysMs) {
 
-    suspend fun models(): List<ModelInfo> =
-        parseModels(call(Request.Builder().url(base() + "/api/v0/models").auth(token()).get().build()))
+    suspend fun models(): List<ModelInfo> {
+        val list = parseModels(call(Request.Builder().url(base() + "/api/v0/models").auth(token()).get().build()))
+        // The loaded context size; older LM Studio builds have no /api/v1/models, so it's optional.
+        val loaded = try {
+            parseLoadedContexts(call(Request.Builder().url(base() + "/api/v1/models").auth(token()).get().build()))
+        } catch (e: ApiException) {
+            emptyMap()
+        } catch (e: IllegalArgumentException) {
+            emptyMap()
+        }
+        return list.map { m -> loaded[m.id]?.let { m.copy(contextLength = it) } ?: m }
+    }
 
     @Volatile private var current: okhttp3.Call? = null
     @Volatile private var userStop = false
@@ -124,7 +134,7 @@ class LmStudioClient(
         val body = chatBody(model, input, previousResponseId, maxOutputTokens)
         val req = Request.Builder().url(base() + "/api/v1/chat").auth(token())
             .post(body.toRequestBody(jsonType)).build()
-        val stream = ChatStream { type, content -> watchdog?.onEvent(type, content) }
+        val stream = ChatStream(onEvent = { type, content -> watchdog?.onEvent(type, content) })
         userStop = false
         return try {
             withConnectRetry {

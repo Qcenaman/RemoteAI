@@ -80,6 +80,8 @@ data class ChatItem(
     val reasoning: String = "",
     /** On a note: the user message a Retry button resends as a fresh attempt. */
     val retry: String = "",
+    /** Tokens, speed and context shown under the message. */
+    val stats: com.qcenaman.remoteai.net.ReplyStats? = null,
 )
 
 @Serializable

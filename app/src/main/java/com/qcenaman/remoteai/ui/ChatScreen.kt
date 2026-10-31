@@ -66,12 +66,15 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.qcenaman.remoteai.Link
 import com.qcenaman.remoteai.UiState
 import com.qcenaman.remoteai.data.ChatItem
 import com.qcenaman.remoteai.net.Approval
+import com.qcenaman.remoteai.net.promptLine
+import com.qcenaman.remoteai.net.replyLine
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -247,7 +250,7 @@ private fun ApprovalCard(a: Approval, deciding: Boolean, onApprove: (String) -> 
 @Composable
 private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?) {
     when (item.role) {
-        "user" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        "user" -> Column(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer,
                 shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
@@ -258,9 +261,12 @@ private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?
                 }
             }
         }
+            item.stats?.let { promptLine(it) }?.takeIf { it.isNotBlank() }?.let { StatsLine(it, end = true) }
+        }
         "assistant" -> Column(Modifier.fillMaxWidth()) {
             if (item.reasoning.isNotBlank()) Thinking(item.reasoning, title)
             if (item.text.isNotBlank()) SelectionContainer { MarkdownText(item.text, Modifier.padding(4.dp)) }
+            item.stats?.let { replyLine(it) }?.takeIf { it.isNotBlank() }?.let { StatsLine(it) }
         }
         "tool" -> ToolView(item)
         else -> Column {
@@ -279,6 +285,18 @@ private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?
             }
         }
     }
+}
+
+/** Small always-visible line of tokens, speed and context under a message. */
+@Composable
+private fun StatsLine(text: String, end: Boolean = false) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = if (end) TextAlign.End else TextAlign.Start,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+    )
 }
 
 @Composable

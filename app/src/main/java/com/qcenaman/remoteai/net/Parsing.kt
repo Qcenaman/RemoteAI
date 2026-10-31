@@ -20,6 +20,7 @@ data class ChatReply(
     val toolCalls: List<ToolCall>,
     val responseId: String?,
     val approvals: List<Approval>,
+    val stats: ReplyStats? = null,
 )
 
 /** waiting: a pc call is blocked on this approval and runs in place once approved (ContextSaver approval = "wait"). */
@@ -72,6 +73,7 @@ fun parseChat(body: String): ChatReply {
         toolCalls = calls,
         responseId = (root["response_id"] as? JsonPrimitive)?.contentOrNull,
         approvals = approvals,
+        stats = parseStats(root),
     )
 }
 
@@ -93,7 +95,8 @@ fun parseApprovals(body: String): List<Approval> {
     }
 }
 
-data class ModelInfo(val id: String, val loaded: Boolean)
+/** contextLength: the loaded context size when known, else the model's maximum (0 = unknown). */
+data class ModelInfo(val id: String, val loaded: Boolean, val contextLength: Int = 0)
 
 /** Parses GET /api/v0/models, keeping chat models (llm/vlm). */
 fun parseModels(body: String): List<ModelInfo> {
@@ -103,8 +106,24 @@ fun parseModels(body: String): List<ModelInfo> {
         val o = el as? JsonObject ?: return@mapNotNull null
         val type = o["type"].str()
         if (type.isNotEmpty() && type != "llm" && type != "vlm") return@mapNotNull null
-        ModelInfo(o["id"].str(), o["state"].str() == "loaded")
+        val ctx = o["loaded_context_length"].intOrNull() ?: o["context_length"].intOrNull() ?: o["max_context_length"].intOrNull() ?: 0
+        ModelInfo(o["id"].str(), o["state"].str() == "loaded", ctx)
     }
+}
+
+/** Context size each loaded model was loaded with, from GET /api/v1/models (model key -> tokens). */
+fun parseLoadedContexts(body: String): Map<String, Int> {
+    val root = json.parseToJsonElement(body) as? JsonObject ?: return emptyMap()
+    val arr = (root["models"] ?: root["data"]) as? JsonArray ?: return emptyMap()
+    val out = mutableMapOf<String, Int>()
+    arr.forEach { el ->
+        val o = el as? JsonObject ?: return@forEach
+        val inst = (o["loaded_instances"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return@forEach
+        val ctx = (inst["config"] as? JsonObject)?.get("context_length").intOrNull()
+            ?: inst["context_length"].intOrNull() ?: return@forEach
+        listOf(o["key"].str(), o["id"].str(), inst["id"].str()).filter { it.isNotBlank() }.forEach { out[it] = ctx }
+    }
+    return out
 }
 
 /** Text of a TokenSaver MCP tools/call result. */
@@ -118,7 +137,14 @@ fun parseMcpText(body: String): Pair<String, Boolean> {
 }
 
 /** Collects a streamed POST /api/v1/chat (SSE), so a reply cut off mid-way still keeps what it had produced. */
-class ChatStream(private val onEvent: (type: String, content: String) -> Unit = { _, _ -> }) {
+class ChatStream(
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val onEvent: (type: String, content: String) -> Unit = { _, _ -> },
+) {
+    private val startedAt = clock()
+    private var firstTokenAt = 0L
+    /** LM Studio streams about one token per delta: counted for replies that never reach chat.end. */
+    private var deltas = 0
     private val text = StringBuilder()
     private val reasoning = StringBuilder()
     private val calls = mutableListOf<ToolCall>()
@@ -154,6 +180,9 @@ class ChatStream(private val onEvent: (type: String, content: String) -> Unit = 
         started = true
         val type = (o["type"] as? JsonPrimitive)?.contentOrNull ?: name
         onEvent(type, o["content"].str())
+        if (type == "message.delta" || type == "reasoning.delta") {
+            if (deltas++ == 0) firstTokenAt = clock()
+        }
         when (type) {
             "message.start" -> if (text.isNotEmpty()) text.append("\n\n")
             "message.delta" -> text.append(o["content"].str())
@@ -164,7 +193,9 @@ class ChatStream(private val onEvent: (type: String, content: String) -> Unit = 
                 calls += ToolCall(meta?.get("tool_name").str(), meta?.get("arguments").pretty(), "Failed: " + o["reason"].str())
             }
             "error" -> error = (o["error"] as? JsonObject)?.get("message").str().ifBlank { raw }
-            "chat.end" -> result = parseChat((o["result"] as? JsonObject)?.toString() ?: "{}")
+            "chat.end" -> result = parseChat((o["result"] as? JsonObject)?.toString() ?: "{}").let { r ->
+                r.copy(stats = (r.stats ?: counted()).copy(seconds = elapsed()))
+            }
         }
     }
 
@@ -177,6 +208,21 @@ class ChatStream(private val onEvent: (type: String, content: String) -> Unit = 
             toolCalls = calls.toList(),
             responseId = null,
             approvals = (calls.flatMap { findApprovals(it.output) } + findApprovals(t)).distinctBy { it.id },
+            stats = counted().takeIf { deltas > 0 },
+        )
+    }
+
+    private fun elapsed() = (clock() - startedAt) / 1000.0
+
+    /** Stats from what was counted here, when LM Studio sent none. */
+    private fun counted(): ReplyStats {
+        val genSecs = if (firstTokenAt > 0) (clock() - firstTokenAt) / 1000.0 else 0.0
+        return ReplyStats(
+            outputTokens = deltas,
+            tokensPerSecond = if (genSecs > 0.2) deltas / genSecs else 0.0,
+            firstTokenSeconds = if (firstTokenAt > 0) (firstTokenAt - startedAt) / 1000.0 else 0.0,
+            seconds = elapsed(),
+            estimated = true,
         )
     }
 }
