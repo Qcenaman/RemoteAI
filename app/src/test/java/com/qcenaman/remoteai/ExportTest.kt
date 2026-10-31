@@ -23,4 +23,18 @@ class ExportTest {
     fun fileTextHasTitleAndTrimmedThinking() {
         assertEquals("Chat\n\nstep one\nstep two\n", thinkingFileText("Chat", "\n step one\nstep two \n"))
     }
+
+    @Test
+    fun wholeChatCopiesAsText() {
+        val items = listOf(
+            com.qcenaman.remoteai.data.ChatItem("user", "hi", stats = com.qcenaman.remoteai.net.ReplyStats(promptTokens = 1)),
+            com.qcenaman.remoteai.data.ChatItem("tool", "ok", tool = "pc", args = "{}"),
+            com.qcenaman.remoteai.data.ChatItem("assistant", "Hello", reasoning = "think"),
+            com.qcenaman.remoteai.data.ChatItem("note", "Stopped"),
+        )
+        org.junit.Assert.assertEquals(
+            "Chat\n\nYou: hi\n(≈1 tokens)\n\nTool pc {}\nok\n\nAI: [Thinking]\nthink\n[/Thinking]\nHello\n\nNote: Stopped\n",
+            conversationText("Chat", items),
+        )
+    }
 }

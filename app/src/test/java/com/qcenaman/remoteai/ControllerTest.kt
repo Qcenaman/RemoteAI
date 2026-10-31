@@ -324,6 +324,12 @@ class ControllerTest {
         assertEquals("LM Studio failed to start", c.state.value.startOutput)
         c.dismissStartOutput()
         assertEquals("", c.state.value.startOutput)
+
+        ts.enqueue(MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"still loading"}]}}"""))
+        c.startLocalAI()
+        lmCode = 200 // Retry once the PC is up clears the old output
+        assertTrue(c.refreshModels())
+        assertEquals("", c.state.value.startOutput)
         ts.shutdown()
     }
 }

@@ -46,6 +46,7 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -99,6 +100,10 @@ fun ChatScreen(
             TopAppBar(
                 title = { Text(st.conversation.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 actions = {
+                    if (st.conversation.items.isNotEmpty()) {
+                        CopyButton(conversationText(st.conversation.title, st.conversation.items), "Chat copied",
+                            LocalContentColor.current, size = 48)
+                    }
                     IconButton(onClick = onConversations) { Icon(Icons.Default.History, "Chats") }
                     IconButton(onClick = onNewChat) { Icon(Icons.Default.Add, "New chat") }
                     IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Settings") }
@@ -243,7 +248,8 @@ private fun ApprovalCard(a: Approval, deciding: Boolean, onApprove: (String) -> 
                 Icon(Icons.Default.Shield, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
                 Spacer(Modifier.size(8.dp))
                 Text(if (a.waiting) "Approve now? The PC is waiting (${a.id})" else "Approve on your PC? (${a.id})", style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer)
+                    color = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.weight(1f))
+                CopyButton("Approval ${a.id}: ${a.what}", "Approval copied", MaterialTheme.colorScheme.onTertiaryContainer)
             }
             SelectionContainer {
                 Text(a.what, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace,
@@ -271,12 +277,19 @@ private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?
                 }
             }
         }
-            item.stats?.let { promptLine(it) }?.takeIf { it.isNotBlank() }?.let { StatsLine(it, end = true) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                item.stats?.let { promptLine(it) }?.takeIf { it.isNotBlank() }?.let { StatsLine(it, Modifier.weight(1f), end = true) }
+                CopyButton(item.text, "Message copied")
+            }
         }
         "assistant" -> Column(Modifier.fillMaxWidth()) {
             if (item.reasoning.isNotBlank()) Thinking(item.reasoning, title)
             if (item.text.isNotBlank()) SelectionContainer { MarkdownText(item.text, Modifier.padding(4.dp)) }
-            item.stats?.let { replyLine(it) }?.takeIf { it.isNotBlank() }?.let { StatsLine(it) }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val line = item.stats?.let { replyLine(it) }.orEmpty()
+                if (line.isNotBlank()) StatsLine(line, Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
+                if (item.text.isNotBlank()) CopyButton(item.text, "Reply copied")
+            }
         }
         "tool" -> ToolView(item)
         else -> Column {
@@ -302,26 +315,37 @@ private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?
 
 /** Copies text so it can be pasted elsewhere, instead of taking a screenshot. */
 @Composable
-private fun CopyButton(text: String, toast: String, tint: androidx.compose.ui.graphics.Color) {
+private fun CopyButton(
+    text: String,
+    toast: String,
+    tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    size: Int = 36,
+) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     IconButton(onClick = {
         clipboard.setText(AnnotatedString(text.trim()))
         Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
-    }, modifier = Modifier.size(36.dp)) {
-        Icon(Icons.Default.ContentCopy, "Copy", Modifier.size(18.dp), tint = tint)
+    }, modifier = Modifier.size(size.dp)) {
+        Icon(Icons.Default.ContentCopy, "Copy", Modifier.size(if (size > 40) 22.dp else 18.dp), tint = tint)
     }
 }
 
 /** Small always-visible line of tokens, speed and context under a message. */
 @Composable
-private fun StatsLine(text: String, end: Boolean = false) {
+private fun StatsLine(text: String, modifier: Modifier = Modifier, end: Boolean = false) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    // Tapping the numbers copies them.
     Text(
         text,
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = if (end) TextAlign.End else TextAlign.Start,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+        modifier = modifier.clickable {
+            clipboard.setText(AnnotatedString(text))
+            Toast.makeText(context, "Stats copied", Toast.LENGTH_SHORT).show()
+        }.padding(horizontal = 4.dp, vertical = 2.dp),
     )
 }
 
@@ -342,7 +366,9 @@ private fun ToolView(item: ChatItem) {
                     fontFamily = FontFamily.Monospace,
                     maxLines = if (open) Int.MAX_VALUE else 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                CopyButton(item.tool.ifBlank { "tool" } + " " + item.args + "\n\n" + item.text, "Tool call copied")
             }
             if (open && item.text.isNotBlank()) {
                 SelectionContainer {

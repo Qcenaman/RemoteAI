@@ -129,6 +129,8 @@ class ChatController(
                     model = if (keep) st.model else loaded.firstOrNull()?.id ?: "",
                     lm = Link.OK,
                     lmMessage = if (loaded.isEmpty()) "No model loaded on the PC." else "",
+                    // Retry found everything up: an old Start Local AI output has nothing left to report.
+                    startOutput = if (loaded.isNotEmpty() && !st.starting) "" else st.startOutput,
                 )
             }
             true
