@@ -1,5 +1,8 @@
 package com.qcenaman.remoteai.ui
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +26,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -56,6 +61,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -120,7 +128,7 @@ fun ChatScreen(
                         )
                     }
                 }
-                items(st.conversation.items) { ItemView(it) }
+                items(st.conversation.items) { ItemView(it, st.conversation.title) }
             }
             if (st.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             InputBar(enabled = !st.busy, onSend = onSend)
@@ -230,7 +238,7 @@ private fun ApprovalCard(a: Approval, deciding: Boolean, onApprove: (String) -> 
 }
 
 @Composable
-private fun ItemView(item: ChatItem) {
+private fun ItemView(item: ChatItem, title: String) {
     when (item.role) {
         "user" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
@@ -244,7 +252,7 @@ private fun ItemView(item: ChatItem) {
             }
         }
         "assistant" -> Column(Modifier.fillMaxWidth()) {
-            if (item.reasoning.isNotBlank()) Collapsible("Thinking", item.reasoning)
+            if (item.reasoning.isNotBlank()) Thinking(item.reasoning, title)
             if (item.text.isNotBlank()) SelectionContainer { MarkdownText(item.text, Modifier.padding(4.dp)) }
         }
         "tool" -> ToolView(item)
@@ -287,17 +295,42 @@ private fun ToolView(item: ChatItem) {
 }
 
 @Composable
-private fun Collapsible(label: String, text: String) {
+private fun Thinking(text: String, title: String) {
     var open by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val ok = runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(thinkingFileText(title, text).toByteArray()) }
+                ?: error("no stream")
+        }.isSuccess
+        Toast.makeText(context, if (ok) "Thinking saved" else "Couldn't save the file", Toast.LENGTH_SHORT).show()
+    }
     Column(Modifier.fillMaxWidth().animateContentSize()) {
-        Text(
-            (if (open) "▾ " else "▸ ") + label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.clickable { open = !open }.padding(4.dp),
-        )
-        if (open) Text(text, style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(4.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                (if (open) "▾ " else "▸ ") + "Thinking",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f).clickable { open = !open }.padding(4.dp),
+            )
+            IconButton(onClick = {
+                clipboard.setText(AnnotatedString(text.trim()))
+                Toast.makeText(context, "Thinking copied", Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.ContentCopy, "Copy thinking", Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = { save.launch(thinkingFileName(title)) }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Save, "Save thinking as text", Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (open) SelectionContainer {
+            Text(text, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(4.dp))
+        }
     }
 }
 
