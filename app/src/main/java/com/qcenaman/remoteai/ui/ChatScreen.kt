@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -85,6 +86,8 @@ fun ChatScreen(
     onSettings: () -> Unit,
     onRefresh: () -> Unit,
     onStartLocalAI: () -> Unit,
+    onStop: () -> Unit,
+    onRetry: (String) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -128,10 +131,14 @@ fun ChatScreen(
                         )
                     }
                 }
-                items(st.conversation.items) { ItemView(it, st.conversation.title) }
+                val lastRetry = st.conversation.items.indexOfLast { it.retry.isNotBlank() }
+                    .takeIf { it == st.conversation.items.lastIndex }
+                itemsIndexed(st.conversation.items) { i, item ->
+                    ItemView(item, st.conversation.title, onRetry.takeIf { i == lastRetry && !st.busy })
+                }
             }
             if (st.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-            InputBar(enabled = !st.busy, onSend = onSend)
+            InputBar(busy = st.busy, onSend = onSend, onStop = onStop)
         }
     }
 }
@@ -238,7 +245,7 @@ private fun ApprovalCard(a: Approval, deciding: Boolean, onApprove: (String) -> 
 }
 
 @Composable
-private fun ItemView(item: ChatItem, title: String) {
+private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?) {
     when (item.role) {
         "user" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
@@ -256,12 +263,21 @@ private fun ItemView(item: ChatItem, title: String) {
             if (item.text.isNotBlank()) SelectionContainer { MarkdownText(item.text, Modifier.padding(4.dp)) }
         }
         "tool" -> ToolView(item)
-        else -> Text(
-            item.text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-            modifier = Modifier.padding(4.dp),
-        )
+        else -> Column {
+            Text(
+                item.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(4.dp),
+            )
+            if (onRetry != null && item.retry.isNotBlank()) {
+                OutlinedButton(onClick = { onRetry(item.retry) }, modifier = Modifier.padding(start = 4.dp)) {
+                    Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text("Retry")
+                }
+            }
+        }
     }
 }
 
@@ -335,7 +351,7 @@ private fun Thinking(text: String, title: String) {
 }
 
 @Composable
-private fun InputBar(enabled: Boolean, onSend: (String) -> Unit) {
+private fun InputBar(busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit) {
     var text by rememberSaveable { mutableStateOf("") }
     Row(
         Modifier.fillMaxWidth().padding(8.dp),
@@ -345,13 +361,17 @@ private fun InputBar(enabled: Boolean, onSend: (String) -> Unit) {
             value = text,
             onValueChange = { text = it },
             modifier = Modifier.weight(1f),
-            placeholder = { Text(if (enabled) "Message" else "Waiting for the reply…") },
+            placeholder = { Text(if (!busy) "Message" else "Waiting for the reply…") },
             maxLines = 6,
         )
         Spacer(Modifier.size(8.dp))
-        FilledIconButton(
-            onClick = { onSend(text); text = "" },
-            enabled = enabled && text.isNotBlank(),
-        ) { Icon(Icons.AutoMirrored.Filled.Send, "Send") }
+        if (busy) {
+            FilledIconButton(onClick = onStop) { Icon(Icons.Default.Stop, "Stop") }
+        } else {
+            FilledIconButton(
+                onClick = { onSend(text); text = "" },
+                enabled = text.isNotBlank(),
+            ) { Icon(Icons.AutoMirrored.Filled.Send, "Send") }
+        }
     }
 }

@@ -26,7 +26,12 @@ sealed class ApiException(message: String) : Exception(message) {
     class Network(val server: String, cause: IOException, val partial: ChatReply? = null) :
         ApiException("$server unreachable: ${cause.message ?: cause.javaClass.simpleName}")
     class NotFound(val server: String) : ApiException("$server: not found")
+    /** The reply was stopped on purpose (Stop button, watchdog or token limit); partial is what had arrived. */
+    class Stopped(val reason: StopReason, val partial: ChatReply) : ApiException("Stopped")
 }
+
+/** Thrown inside a request to end it on purpose; never retried as a connect failure. */
+private class StopSignal(val reason: StopReason) : IOException("stopped")
 
 private val jsonType = "application/json".toMediaType()
 
@@ -100,38 +105,73 @@ class LmStudioClient(
     suspend fun models(): List<ModelInfo> =
         parseModels(call(Request.Builder().url(base() + "/api/v0/models").auth(token()).get().build()))
 
-    suspend fun chat(model: String, input: String, previousResponseId: String?): ChatReply {
-        val body = buildJsonObject {
-            put("model", model)
-            put("input", input)
-            put("integrations", JsonArray(listOf(JsonPrimitive("mcp/contextsaver"))))
-            put("stream", true)
-            if (!previousResponseId.isNullOrBlank()) put("previous_response_id", previousResponseId)
-        }.toString()
+    @Volatile private var current: okhttp3.Call? = null
+    @Volatile private var userStop = false
+
+    /** Stops the reply in progress (LM Studio stops generating when the request is cancelled). */
+    fun cancel() {
+        userStop = true
+        current?.cancel()
+    }
+
+    suspend fun chat(
+        model: String,
+        input: String,
+        previousResponseId: String?,
+        maxOutputTokens: Int = 0,
+        watchdog: Watchdog? = null,
+    ): ChatReply {
+        val body = chatBody(model, input, previousResponseId, maxOutputTokens)
         val req = Request.Builder().url(base() + "/api/v1/chat").auth(token())
             .post(body.toRequestBody(jsonType)).build()
-        val stream = ChatStream()
+        val stream = ChatStream { type, content -> watchdog?.onEvent(type, content) }
+        userStop = false
         return try {
             withConnectRetry {
-                http.newCall(req).execute().use { r ->
-                    checkStatus(r)
-                    val b = r.body ?: return@use parseChat("{}")
-                    if (b.contentType()?.subtype != "event-stream") return@use parseChat(b.string())
-                    val src = b.source()
-                    while (stream.result == null) {
-                        val line = src.readUtf8Line() ?: break
-                        stream.feedLine(line)
+                if (userStop) throw StopSignal(StopReason.USER)
+                val call = http.newCall(req)
+                current = call
+                if (userStop) call.cancel()
+                try {
+                    call.execute().use { r ->
+                        checkStatus(r)
+                        val b = r.body ?: return@use parseChat("{}")
+                        if (b.contentType()?.subtype != "event-stream") return@use parseChat(b.string())
+                        val src = b.source()
+                        while (stream.result == null) {
+                            val line = src.readUtf8Line() ?: break
+                            stream.feedLine(line)
+                            watchdog?.verdict()?.let { throw StopSignal(it) }
+                        }
+                        stream.finish()
+                        stream.error?.let { throw ApiException.Http(server, 200, it) }
+                        stream.result ?: throw IOException("stream ended before chat.end")
                     }
-                    stream.finish()
-                    stream.error?.let { throw ApiException.Http(server, 200, it) }
-                    stream.result ?: throw IOException("stream ended before chat.end")
+                } catch (e: IOException) {
+                    if (userStop && e !is StopSignal) throw StopSignal(StopReason.USER)
+                    throw e
+                } finally {
+                    current = null
                 }
             }
+        } catch (e: StopSignal) {
+            throw ApiException.Stopped(e.reason, stream.partial())
         } catch (e: IOException) {
             throw ApiException.Network(server, e, stream.partial().takeIf { stream.started })
         }
     }
 }
+
+/** Body of POST /api/v1/chat; maxOutputTokens <= 0 sends no limit. */
+fun chatBody(model: String, input: String, previousResponseId: String?, maxOutputTokens: Int): String =
+    buildJsonObject {
+        put("model", model)
+        put("input", input)
+        put("integrations", JsonArray(listOf(JsonPrimitive("mcp/contextsaver"))))
+        put("stream", true)
+        if (maxOutputTokens > 0) put("max_output_tokens", maxOutputTokens)
+        if (!previousResponseId.isNullOrBlank()) put("previous_response_id", previousResponseId)
+    }.toString()
 
 /** ContextSaver's approval server: the only way a risky pc call gets approved. */
 class ApprovalClient(

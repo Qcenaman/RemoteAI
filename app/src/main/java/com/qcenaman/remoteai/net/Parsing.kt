@@ -118,7 +118,7 @@ fun parseMcpText(body: String): Pair<String, Boolean> {
 }
 
 /** Collects a streamed POST /api/v1/chat (SSE), so a reply cut off mid-way still keeps what it had produced. */
-class ChatStream {
+class ChatStream(private val onEvent: (type: String, content: String) -> Unit = { _, _ -> }) {
     private val text = StringBuilder()
     private val reasoning = StringBuilder()
     private val calls = mutableListOf<ToolCall>()
@@ -152,7 +152,9 @@ class ChatStream {
         event = ""
         val o = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return
         started = true
-        when ((o["type"] as? JsonPrimitive)?.contentOrNull ?: name) {
+        val type = (o["type"] as? JsonPrimitive)?.contentOrNull ?: name
+        onEvent(type, o["content"].str())
+        when (type) {
             "message.start" -> if (text.isNotEmpty()) text.append("\n\n")
             "message.delta" -> text.append(o["content"].str())
             "reasoning.delta" -> reasoning.append(o["content"].str())

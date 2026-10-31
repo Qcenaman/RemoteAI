@@ -11,6 +11,8 @@ import com.qcenaman.remoteai.net.ApprovalClient
 import com.qcenaman.remoteai.net.ChatReply
 import com.qcenaman.remoteai.net.LmStudioClient
 import com.qcenaman.remoteai.net.ModelInfo
+import com.qcenaman.remoteai.net.StopReason
+import com.qcenaman.remoteai.net.Watchdog
 import com.qcenaman.remoteai.net.TokenSaverClient
 import com.qcenaman.remoteai.net.baseUrl
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +49,7 @@ class ChatController(
     lmFactory: ((() -> String), (() -> String)) -> LmStudioClient = { b, t -> LmStudioClient(b, t) },
     approvalFactory: ((() -> String), (() -> String)) -> ApprovalClient = { b, t -> ApprovalClient(b, t) },
     tokenSaverFactory: ((() -> String), (() -> String)) -> TokenSaverClient = { b, t -> TokenSaverClient(b, t) },
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -77,6 +80,12 @@ class ChatController(
         settingsStore.save(new)
         _state.update { it.copy(settings = new, lm = Link.UNKNOWN, approvals = Link.UNKNOWN, lmMessage = "") }
     }
+
+    /** Stop button: ends the reply in progress; what arrived is kept, marked (stopped). */
+    fun stop() = lm.cancel()
+
+    /** Resends a message as a fresh attempt (the stopped reply never became part of the model's history). */
+    suspend fun retry(text: String) = send(text)
 
     fun selectModel(id: String) = _state.update { it.copy(model = id) }
 
@@ -178,9 +187,14 @@ class ChatController(
                         val missed = lost[convId].orEmpty()
                         val sent = if (missed.isEmpty()) input else lostContext(missed) + input
                         try {
-                            val reply = lm.chat(st.model, sent, st.conversation.responseId)
+                            val dog = Watchdog(s.stopThinkingMinutes * 60_000L, clock)
+                            val reply = lm.chat(st.model, sent, st.conversation.responseId, s.maxReplyTokens, dog)
                             lost.remove(convId)
-                            saveReply(reply, st.model)
+                            if (s.maxReplyTokens > 0 && reply.text.isBlank() && reply.toolCalls.isEmpty() && reply.reasoning.isNotBlank()) {
+                                // Ran out of tokens while still thinking: keep it on screen only, not in the model's history.
+                                saveReply(reply.copy(responseId = null), st.model, stopped = true)
+                                stoppedNote(StopReason.TOKEN_LIMIT, input)
+                            } else saveReply(reply, st.model)
                             // The 50 s wait ran out before the approval landed: the call fell back to "call again".
                             reply.approvals.map { it.id }.filter { approvedInPlace.remove(it) }.forEach { retry += it }
                         } catch (e: ApiException.Network) {
@@ -193,6 +207,15 @@ class ChatController(
                             }
                             remember(convId, record.toString())
                             throw e
+                        } catch (e: ApiException.Stopped) {
+                            val part = e.partial
+                            saveReply(part, st.model, stopped = true)
+                            // Tools that ran are real; the thinking and text stay on screen only, so a loop can't carry over.
+                            if (part.toolCalls.isNotEmpty()) {
+                                remember(convId, "My message: $input\n(The reply was stopped.)" +
+                                    part.toolCalls.joinToString("") { "\nYou called ${it.tool} ${it.arguments} → ${it.output.take(300)}" })
+                            }
+                            if (e.reason != StopReason.USER) stoppedNote(e.reason, input)
                         }
                     }
                 }
@@ -210,14 +233,28 @@ class ChatController(
         for (id in retry) send("I approved $id.${approvalDetails(id)} Call the pc tool again with the same args plus confirm:\"$id\".")
     }
 
-    private fun saveReply(reply: ChatReply, model: String) {
+    private fun stoppedNote(reason: StopReason, input: String) {
+        val why = when (reason) {
+            StopReason.REPEATING -> "it kept repeating the same thought"
+            StopReason.TOKEN_LIMIT -> "it used ${s.maxReplyTokens} tokens thinking without answering"
+            else -> "${s.stopThinkingMinutes} min without doing anything"
+        }
+        saveConv {
+            it.copy(items = it.items + ChatItem("note",
+                "Stopped: the model was going in circles ($why). Ask again, or say what to do, e.g. which app or file.",
+                retry = input))
+        }
+    }
+
+    private fun saveReply(reply: ChatReply, model: String, stopped: Boolean = false) {
         if (reply.approvals.isNotEmpty()) {
             _state.update { u -> u.copy(pending = (u.pending + reply.approvals).distinctBy { a -> a.id }) }
         }
         saveConv { c ->
             val tools = reply.toolCalls.map { ChatItem("tool", it.output, tool = it.tool, args = it.arguments) }
-            val answer = if (reply.text.isNotBlank() || reply.reasoning.isNotBlank())
-                listOf(ChatItem("assistant", reply.text, reasoning = reply.reasoning)) else emptyList()
+            val text = if (stopped) (reply.text + "\n\n*(stopped)*").trim() else reply.text
+            val answer = if (stopped || reply.text.isNotBlank() || reply.reasoning.isNotBlank())
+                listOf(ChatItem("assistant", text, reasoning = reply.reasoning)) else emptyList()
             c.copy(
                 items = c.items + tools + answer,
                 responseId = reply.responseId ?: c.responseId,

@@ -82,6 +82,8 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
     var apToken by remember { mutableStateOf(s.approvalToken) }
     var tsToken by remember { mutableStateOf(s.tokenSaverToken) }
     var cmd by remember { mutableStateOf(s.startCommand) }
+    var maxTokens by remember { mutableStateOf(s.maxReplyTokens.toString()) }
+    var stopMin by remember { mutableStateOf(s.stopThinkingMinutes.toString()) }
 
     Scaffold(topBar = {
         TopAppBar(
@@ -104,6 +106,9 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
             Field("Port", tsPort, number = true) { tsPort = it }
             Field("Link token", tsToken, secret = true) { tsToken = it }
             Field("Start command", cmd) { cmd = it }
+            Section("Runaway replies")
+            Field("Max reply tokens (0 = no limit)", maxTokens, number = true) { maxTokens = it }
+            Field("Stop thinking after, minutes (0 = off)", stopMin, number = true) { stopMin = it }
             Button(
                 onClick = {
                     onSave(
@@ -116,6 +121,8 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
                             approvalToken = apToken.trim(),
                             tokenSaverToken = tsToken.trim(),
                             startCommand = cmd.trim(),
+                            maxReplyTokens = maxTokens.trim().toIntOrNull()?.coerceAtLeast(0) ?: s.maxReplyTokens,
+                            stopThinkingMinutes = stopMin.trim().toIntOrNull()?.coerceAtLeast(0) ?: s.stopThinkingMinutes,
                         )
                     )
                 },

@@ -90,6 +90,8 @@ fun App(vm: MainViewModel) {
             onSettings = { screen = Screen.SETTINGS },
             onRefresh = { vm.refresh() },
             onStartLocalAI = { vm.startLocalAI() },
+            onStop = { vm.controller.stop() },
+            onRetry = { vm.retry(it) },
         )
         Screen.CONVERSATIONS -> ConversationsScreen(
             st = st,

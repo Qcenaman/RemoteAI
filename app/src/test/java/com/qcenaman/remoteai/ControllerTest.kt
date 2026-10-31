@@ -30,6 +30,7 @@ class ControllerTest {
     @Volatile private var apCode = 200
     @Volatile private var sse: String? = null
     @Volatile private var chatDelayMs = 0L
+    @Volatile private var slowStream = false
     @Volatile private var chatReply = """{"output":[{"type":"message","content":"done"}],"response_id":"resp_2"}"""
 
     private class FakeSettings(var s: Settings) : SettingsStore {
@@ -50,7 +51,10 @@ class ControllerTest {
                         "/api/v1/chat" -> {
                             chatBodies += request.body.readUtf8()
                             if (chatDelayMs > 0) Thread.sleep(chatDelayMs)
-                            sse?.let { MockResponse().setHeader("Content-Type", "text/event-stream").setBody(it) }
+                            sse?.let {
+                                MockResponse().setHeader("Content-Type", "text/event-stream").setBody(it)
+                                    .apply { if (slowStream) throttleBody(64, 100, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                            }
                                 ?: MockResponse().setBody(chatReply)
                         }
                         else -> MockResponse().setResponseCode(404)
@@ -89,10 +93,78 @@ class ControllerTest {
         ap.shutdown()
     }
 
-    private fun controller(lmToken: String = "lmtok", apToken: String = "aptok") = ChatController(
-        FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, lmToken = lmToken, approvalToken = apToken)),
+    private fun controller(lmToken: String = "lmtok", apToken: String = "aptok", maxTokens: Int = 8192) = ChatController(
+        FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, lmToken = lmToken, approvalToken = apToken,
+            maxReplyTokens = maxTokens)),
         MemoryConversationStore(),
     )
+
+    private fun ev(type: String, content: String) =
+        "event: $type\ndata: {\"type\":\"$type\",\"content\":\"$content\"}\n\n"
+
+    @Test
+    fun loopingThinkingStopsAndIsNotSentBack() = runBlocking {
+        val c = controller()
+        c.send("hello")
+        assertEquals("resp_2", c.state.value.conversation.responseId)
+        sse = ev("chat.start", "") + (1..8).joinToString("") { ev("reasoning.delta", "Search query: AdbSaver on the phone\\n") } +
+            ev("message.delta", "never reached")
+        c.send("Install AdbSaver on my phone")
+        val items = c.state.value.conversation.items
+        val answer = items.last { it.role == "assistant" }
+        assertTrue(answer.text.contains("(stopped)"))
+        assertTrue(answer.reasoning.contains("Search query"))
+        val note = items.last()
+        assertEquals("note", note.role)
+        assertTrue(note.text.startsWith("Stopped: the model was going in circles"))
+        assertEquals("Install AdbSaver on my phone", note.retry)
+        assertEquals("history still ends at the last good reply", "resp_2", c.state.value.conversation.responseId)
+
+        sse = null
+        chatBodies.clear()
+        c.retry(note.retry)
+        val body = chatBodies.single()
+        assertTrue(body.contains("\"input\":\"Install AdbSaver on my phone\""))
+        assertTrue(body.contains("\"previous_response_id\":\"resp_2\""))
+        assertTrue(!body.contains("Search query"))
+    }
+
+    @Test
+    fun stopButtonEndsTheReplyAndKeepsWhatArrived() = runBlocking {
+        val c = controller()
+        slowStream = true
+        sse = ev("chat.start", "") + ev("message.delta", "Partial answer") +
+            (1..200).joinToString("") { ev("reasoning.delta", "thinking line number $it\\n") }
+        coroutineScope {
+            val job = async(Dispatchers.IO) { c.send("long task") }
+            delay(800)
+            c.stop()
+            job.await()
+        }
+        slowStream = false
+        val items = c.state.value.conversation.items
+        val answer = items.last { it.role == "assistant" }
+        assertTrue(answer.text.startsWith("Partial answer"))
+        assertTrue(answer.text.contains("(stopped)"))
+        assertTrue("no note for a user stop", items.none { it.role == "note" })
+        assertTrue(!c.state.value.busy)
+
+        sse = null
+        chatBodies.clear()
+        c.send("next")
+        assertTrue(!chatBodies.single().contains("Partial answer"))
+        assertEquals("done", c.state.value.conversation.items.last().text)
+    }
+
+    @Test
+    fun tokenLimitWhileThinkingShowsRetry() = runBlocking {
+        val c = controller()
+        chatReply = """{"output":[{"type":"reasoning","content":"hmm"}],"response_id":"resp_9"}"""
+        c.send("do it")
+        assertEquals("", c.state.value.conversation.responseId.orEmpty())
+        assertEquals("do it", c.state.value.conversation.items.last().retry)
+        assertTrue(chatBodies.single().contains("\"max_output_tokens\":8192"))
+    }
 
     @Test
     fun approveSendsExactlyOnePostAndRefreshesList() = runBlocking {

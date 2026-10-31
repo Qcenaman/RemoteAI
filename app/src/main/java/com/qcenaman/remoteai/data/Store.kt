@@ -18,6 +18,10 @@ data class Settings(
     val approvalToken: String = "",
     val tokenSaverToken: String = "",
     val startCommand: String = "\"D:\\Claude Apps\\ContextSaver\\app\\contextsaver.exe\" start",
+    /** Max output tokens per generation (between tool calls); 0 = no limit. */
+    val maxReplyTokens: Int = 8192,
+    /** Stop a reply that only thinks for this long; 0 = off. */
+    val stopThinkingMinutes: Int = 3,
 )
 
 interface SettingsStore {
@@ -46,6 +50,8 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             approvalToken = prefs.getString("approvalToken", "") ?: "",
             tokenSaverToken = prefs.getString("tokenSaverToken", "") ?: "",
             startCommand = prefs.getString("startCommand", d.startCommand) ?: d.startCommand,
+            maxReplyTokens = prefs.getInt("maxReplyTokens", d.maxReplyTokens),
+            stopThinkingMinutes = prefs.getInt("stopThinkingMinutes", d.stopThinkingMinutes),
         )
     }
 
@@ -59,6 +65,8 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             .putString("approvalToken", s.approvalToken.trim())
             .putString("tokenSaverToken", s.tokenSaverToken.trim())
             .putString("startCommand", s.startCommand.trim())
+            .putInt("maxReplyTokens", s.maxReplyTokens.coerceAtLeast(0))
+            .putInt("stopThinkingMinutes", s.stopThinkingMinutes.coerceAtLeast(0))
             .apply()
     }
 }
@@ -70,6 +78,8 @@ data class ChatItem(
     val tool: String = "",
     val args: String = "",
     val reasoning: String = "",
+    /** On a note: the user message a Retry button resends as a fresh attempt. */
+    val retry: String = "",
 )
 
 @Serializable
