@@ -15,6 +15,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -359,6 +360,22 @@ class ControllerTest {
         assertEquals("", c.state.value.startOutput)
         lmCode = 200
         ts.shutdown()
+    }
+
+    /** A port nothing listens on, like LM Studio's with its server off. */
+    private fun closedPort(): Int = MockWebServer().run { start(); val p = port; shutdown(); p }
+
+    @Test
+    fun startLocalAISaysThePcIsUnreachableWhenTokenSaverDoesNotAnswer() = runBlocking {
+        val c = ChatController(
+            FakeSettings(Settings(host = "127.0.0.1", lmPort = closedPort(), approvalPort = ap.port, tokenSaverPort = closedPort(),
+                lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
+            MemoryConversationStore(),
+            startWaitMs = 0,
+        )
+        c.startLocalAI()
+        assertEquals(PC_UNREACHABLE, c.state.value.startOutput)
+        assertFalse(c.state.value.starting)
     }
 
     @Test

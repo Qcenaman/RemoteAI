@@ -274,7 +274,7 @@ private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit
     val lmMsg = when (st.lm) {
         Link.NO_TOKEN -> "LM Studio token missing."
         Link.BAD_TOKEN -> "LM Studio token wrong or missing."
-        Link.OFFLINE -> "LM Studio isn't answering. Is the PC on, with Tailscale and Local AI running?"
+        Link.OFFLINE -> if (st.starting) "LM Studio isn't answering yet." else "LM Studio isn't running on the PC. Tap Start Local AI to start it."
         Link.ERROR -> st.lmMessage
         else -> if (st.lm == Link.OK && st.model.isBlank()) "No model loaded on the PC." else ""
     }

@@ -406,6 +406,9 @@ class ChatController(
                 _state.update { it.copy(startOutput = "Starting LM Studio on the PC…") }
                 val out = try {
                     tokenSaver.run(s.startCommand)
+                } catch (e: ApiException.Network) {
+                    // TokenSaver's link runs whenever the PC is on, so not reaching it means the PC itself is out of reach.
+                    PC_UNREACHABLE
                 } catch (e: ApiException) {
                     e.message ?: "Couldn't start Local AI"
                 }
@@ -498,6 +501,8 @@ class ChatController(
         _state.update { it.copy(startOutput = "") }
     }
 }
+
+const val PC_UNREACHABLE = "Can't reach the PC: it's off or asleep, or Tailscale isn't connected on the PC or this phone."
 
 /** Fills only blank token fields, so an outside launch can never overwrite tokens already set. */
 fun fillEmptyTokens(s: Settings, lm: String?, approval: String?, tokenSaver: String?): Settings = s.copy(
