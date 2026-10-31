@@ -51,7 +51,7 @@ fun parseStats(root: JsonObject): ReplyStats? {
 fun estimateTokens(text: String): Int = if (text.isBlank()) 0 else (text.trim().length + 3) / 4
 
 private fun count(n: Int): String = when {
-    n >= 10_000 -> String.format(Locale.US, "%.0fk", n / 1000.0)
+    n >= 100_000 -> String.format(Locale.US, "%.0fk", n / 1000.0)
     n >= 1_000 -> String.format(Locale.US, "%.1fk", n / 1000.0)
     else -> n.toString()
 }
