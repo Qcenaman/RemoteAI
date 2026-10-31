@@ -22,6 +22,8 @@ data class Settings(
     val maxReplyTokens: Int = 8192,
     /** Stop a reply that only thinks for this long; 0 = off. */
     val stopThinkingMinutes: Int = 3,
+    /** Model key loaded last; Start Local AI loads it again. */
+    val lastModel: String = "",
 )
 
 interface SettingsStore {
@@ -52,6 +54,7 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             startCommand = prefs.getString("startCommand", d.startCommand) ?: d.startCommand,
             maxReplyTokens = prefs.getInt("maxReplyTokens", d.maxReplyTokens),
             stopThinkingMinutes = prefs.getInt("stopThinkingMinutes", d.stopThinkingMinutes),
+            lastModel = prefs.getString("lastModel", "") ?: "",
         )
     }
 
@@ -67,6 +70,7 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             .putString("startCommand", s.startCommand.trim())
             .putInt("maxReplyTokens", s.maxReplyTokens.coerceAtLeast(0))
             .putInt("stopThinkingMinutes", s.stopThinkingMinutes.coerceAtLeast(0))
+            .putString("lastModel", s.lastModel)
             .apply()
     }
 }

@@ -84,7 +84,7 @@ fun App(vm: MainViewModel) {
             onSend = { vm.send(it) },
             onApprove = { vm.approve(it) },
             onDeny = { vm.deny(it) },
-            onModel = { vm.controller.selectModel(it) },
+            onModel = { vm.chooseModel(it) },
             onNewChat = { vm.controller.newConversation() },
             onConversations = { screen = Screen.CONVERSATIONS },
             onSettings = { screen = Screen.SETTINGS },

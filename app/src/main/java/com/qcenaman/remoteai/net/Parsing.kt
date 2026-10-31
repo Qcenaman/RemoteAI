@@ -95,8 +95,48 @@ fun parseApprovals(body: String): List<Approval> {
     }
 }
 
-/** contextLength: the loaded context size when known, else the model's maximum (0 = unknown). */
-data class ModelInfo(val id: String, val loaded: Boolean, val contextLength: Int = 0)
+/**
+ * id: what chats are sent to (the loaded instance, else the model key); key: what loading takes.
+ * contextLength: the loaded context size when known, else the model's maximum (0 = unknown).
+ */
+data class ModelInfo(
+    val id: String,
+    val loaded: Boolean,
+    val contextLength: Int = 0,
+    val key: String = id,
+    val name: String = "",
+    val sizeBytes: Long = 0,
+) {
+    val label: String get() = name.ifBlank { key }
+}
+
+/** Every downloaded chat model from GET /api/v1/models, loaded or not. */
+fun parseModelsV1(body: String): List<ModelInfo> {
+    val root = json.parseToJsonElement(body) as? JsonObject ?: return emptyList()
+    val arr = root["models"] as? JsonArray ?: return emptyList()
+    return arr.mapNotNull { el ->
+        val o = el as? JsonObject ?: return@mapNotNull null
+        val type = o["type"].str()
+        if (type.isNotEmpty() && type != "llm" && type != "vlm") return@mapNotNull null
+        val key = o["key"].str().ifBlank { o["id"].str() }
+        if (key.isBlank()) return@mapNotNull null
+        val inst = (o["loaded_instances"] as? JsonArray)?.firstOrNull() as? JsonObject
+        val ctx = (inst?.get("config") as? JsonObject)?.get("context_length").intOrNull()
+            ?: o["max_context_length"].intOrNull() ?: 0
+        ModelInfo(
+            id = inst?.get("id").str().ifBlank { key },
+            loaded = inst != null,
+            contextLength = ctx,
+            key = key,
+            name = o["display_name"].str(),
+            sizeBytes = (o["size_bytes"] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()?.toLong() ?: 0,
+        )
+    }
+}
+
+/** Instance id from POST /api/v1/models/load. */
+fun parseLoaded(body: String, fallback: String): String =
+    ((json.parseToJsonElement(body) as? JsonObject)?.get("instance_id")).str().ifBlank { fallback }
 
 /** Parses GET /api/v0/models, keeping chat models (llm/vlm). */
 fun parseModels(body: String): List<ModelInfo> {

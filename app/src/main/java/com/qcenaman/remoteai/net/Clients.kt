@@ -102,17 +102,29 @@ class LmStudioClient(
     retryDelaysMs: List<Long> = listOf(2_000, 5_000),
 ) : HttpBase("LM Studio", http, retryDelaysMs) {
 
+    /** Every downloaded chat model (loaded or not); falls back to the older v0 list. */
     suspend fun models(): List<ModelInfo> {
-        val list = parseModels(call(Request.Builder().url(base() + "/api/v0/models").auth(token()).get().build()))
-        // The loaded context size; older LM Studio builds have no /api/v1/models, so it's optional.
-        val loaded = try {
-            parseLoadedContexts(call(Request.Builder().url(base() + "/api/v1/models").auth(token()).get().build()))
-        } catch (e: ApiException) {
-            emptyMap()
+        val v1 = try {
+            parseModelsV1(call(Request.Builder().url(base() + "/api/v1/models").auth(token()).get().build()))
+        } catch (e: ApiException.NotFound) {
+            emptyList()
         } catch (e: IllegalArgumentException) {
-            emptyMap()
+            emptyList()
         }
-        return list.map { m -> loaded[m.id]?.let { m.copy(contextLength = it) } ?: m }
+        if (v1.isNotEmpty()) return v1
+        return parseModels(call(Request.Builder().url(base() + "/api/v0/models").auth(token()).get().build()))
+    }
+
+    /** Loads a model on the PC (waits until it's in memory); returns the instance id to chat with. */
+    suspend fun load(key: String): String {
+        val body = buildJsonObject { put("model", key) }.toString()
+        return parseLoaded(call(Request.Builder().url(base() + "/api/v1/models/load").auth(token())
+            .post(body.toRequestBody(jsonType)).build()), key)
+    }
+
+    suspend fun unload(instanceId: String) {
+        val body = buildJsonObject { put("instance_id", instanceId) }.toString()
+        call(Request.Builder().url(base() + "/api/v1/models/unload").auth(token()).post(body.toRequestBody(jsonType)).build())
     }
 
     @Volatile private var current: okhttp3.Call? = null

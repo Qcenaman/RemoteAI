@@ -305,31 +305,59 @@ class ControllerTest {
     }
 
     @Test
-    fun startLocalAIHidesOutputOnceTheModelIsUp() = runBlocking {
+    fun startLocalAIStartsLmStudioThenLoadsTheModel() = runBlocking {
+        val loads = Collections.synchronizedList(mutableListOf<String>())
+        var up = false
+        var loaded = false
+        val pc = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                    "/mcp" -> { up = true; MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"LM Studio server on"}]}}""") }
+                    "/api/v1/models" -> if (!up) MockResponse().setResponseCode(503) else MockResponse().setBody(
+                        """{"models":[{"type":"llm","key":"qwen/qwen3.6-27b","display_name":"Qwen3.6 27B","max_context_length":131072,
+                           "loaded_instances":${if (loaded) "[{\"id\":\"qwen3.6-27b\",\"config\":{\"context_length\":32768}}]" else "[]"}},
+                           {"type":"embedding","key":"nomic","loaded_instances":[]}]}"""
+                    )
+                    "/api/v1/models/load" -> { loads += request.body.readUtf8(); loaded = true; MockResponse().setBody("""{"instance_id":"qwen3.6-27b","status":"loaded"}""") }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            start()
+        }
+        val c = ChatController(
+            FakeSettings(Settings(host = "127.0.0.1", lmPort = pc.port, approvalPort = ap.port, tokenSaverPort = pc.port,
+                lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
+            MemoryConversationStore(),
+            startWaitMs = 2_000, startPollMs = 50,
+        )
+        c.startLocalAI()
+        val st = c.state.value
+        assertEquals(listOf("""{"model":"qwen/qwen3.6-27b"}"""), loads.toList())
+        assertEquals("qwen3.6-27b", st.model)
+        assertEquals(32768, st.models.single().contextLength)
+        assertEquals("", st.startOutput)
+        assertEquals("qwen/qwen3.6-27b", st.settings.lastModel)
+        pc.shutdown()
+    }
+
+    @Test
+    fun startLocalAIKeepsTheOutputWhenLmStudioStaysDown() = runBlocking {
         val ts = MockWebServer().apply {
-            enqueue(MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"LM Studio server on; qwen loaded"}]}}"""))
             enqueue(MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"LM Studio failed to start"}]}}"""))
             start()
         }
+        lmCode = 503
         val c = ChatController(
             FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, tokenSaverPort = ts.port,
                 lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
             MemoryConversationStore(),
+            startWaitMs = 0,
         )
-        c.startLocalAI()
-        assertEquals("", c.state.value.startOutput)
-
-        lmCode = 503 // still down after starting: the output stays, so it can be copied
         c.startLocalAI()
         assertEquals("LM Studio failed to start", c.state.value.startOutput)
         c.dismissStartOutput()
         assertEquals("", c.state.value.startOutput)
-
-        ts.enqueue(MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"still loading"}]}}"""))
-        c.startLocalAI()
-        lmCode = 200 // Retry once the PC is up clears the old output
-        assertTrue(c.refreshModels())
-        assertEquals("", c.state.value.startOutput)
+        lmCode = 200
         ts.shutdown()
     }
 }

@@ -40,6 +40,8 @@ data class UiState(
     val lmMessage: String = "",
     val starting: Boolean = false,
     val startOutput: String = "",
+    /** Model being loaded on the PC (label), blank when none. */
+    val loadingModel: String = "",
 )
 
 fun newConv() = Conversation(UUID.randomUUID().toString(), "New chat", System.currentTimeMillis())
@@ -52,6 +54,9 @@ class ChatController(
     approvalFactory: ((() -> String), (() -> String)) -> ApprovalClient = { b, t -> ApprovalClient(b, t) },
     tokenSaverFactory: ((() -> String), (() -> String)) -> TokenSaverClient = { b, t -> TokenSaverClient(b, t) },
     private val clock: () -> Long = System::currentTimeMillis,
+    /** How long Start Local AI waits for LM Studio to answer after starting it. */
+    private val startWaitMs: Long = 90_000,
+    private val startPollMs: Long = 3_000,
 ) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -91,6 +96,50 @@ class ChatController(
 
     fun selectModel(id: String) = _state.update { it.copy(model = id) }
 
+    /**
+     * Picked in the model list: chats go to it, loading it on the PC first if needed.
+     * Other loaded chat models are unloaded so two big models don't fight over the GPU.
+     */
+    suspend fun chooseModel(key: String): Boolean {
+        val m = _state.value.models.firstOrNull { it.key == key || it.id == key }
+        if (m != null && m.loaded) {
+            _state.update { it.copy(model = m.id) }
+            rememberModel(m.key)
+            return true
+        }
+        val label = m?.label ?: key
+        _state.update { it.copy(loadingModel = label) }
+        return try {
+            _state.value.models.filter { it.loaded && it.key != key }.forEach { lm.unload(it.id) }
+            val id = lm.load(m?.key ?: key)
+            refreshModels()
+            _state.update { st -> st.copy(model = st.models.firstOrNull { it.id == id || it.key == key && it.loaded }?.id ?: id) }
+            rememberModel(m?.key ?: key)
+            true
+        } catch (e: ApiException) {
+            _state.update { it.copy(lm = linkFor(e), lmMessage = "Couldn't load $label: ${e.message}") }
+            false
+        } finally {
+            _state.update { it.copy(loadingModel = "") }
+        }
+    }
+
+    private fun rememberModel(key: String) {
+        if (s.lastModel == key) return
+        val new = s.copy(lastModel = key)
+        settingsStore.save(new)
+        _state.update { it.copy(settings = new) }
+    }
+
+    /** The model Start Local AI loads: the last one used, else this chat's, else the first on the PC. */
+    private fun preferredModel(): String? {
+        val ms = _state.value.models
+        return listOf(s.lastModel, _state.value.conversation.model)
+            .filter { it.isNotBlank() }
+            .firstNotNullOfOrNull { want -> ms.firstOrNull { it.key == want || it.id == want }?.key }
+            ?: ms.firstOrNull()?.key
+    }
+
     fun newConversation() = _state.update { it.copy(conversation = newConv()) }
 
     fun openConversation(id: String) {
@@ -128,7 +177,7 @@ class ChatController(
                     models = ms,
                     model = if (keep) st.model else loaded.firstOrNull()?.id ?: "",
                     lm = Link.OK,
-                    lmMessage = if (loaded.isEmpty()) "No model loaded on the PC." else "",
+                    lmMessage = if (loaded.isEmpty()) "No model loaded on the PC. Tap the model button to pick one." else "",
                     // Retry found everything up: an old Start Local AI output has nothing left to report.
                     startOutput = if (loaded.isNotEmpty() && !st.starting) "" else st.startOutput,
                 )
@@ -176,7 +225,12 @@ class ChatController(
             }
             _state.update { it.copy(busy = true) }
             try {
-                if (_state.value.model.isBlank() || _state.value.lm != Link.OK) refreshModels()
+                if (_state.value.model.isBlank() || _state.value.lm != Link.OK) {
+                    refreshModels()
+                    // PC asleep or no model loaded: start LM Studio and load the model before sending.
+                    val now = _state.value
+                    if (now.lm == Link.OFFLINE || (now.lm == Link.OK && now.models.none { it.loaded })) startLocalAI()
+                }
                 val st = _state.value
                 when {
                     st.lm == Link.NO_TOKEN -> note("Add the LM Studio token in Settings.")
@@ -185,7 +239,7 @@ class ChatController(
                         remember(st.conversation.id, "My message: $input")
                         note(st.lmMessage.ifBlank { "Can't reach LM Studio." })
                     }
-                    st.model.isBlank() -> note("No model is loaded on the PC. Tap Start Local AI.")
+                    st.model.isBlank() -> note("No model is loaded on the PC. Tap the model button to pick one.")
                     else -> {
                         val convId = st.conversation.id
                         val missed = lost[convId].orEmpty()
@@ -333,23 +387,43 @@ class ChatController(
         }
     }
 
+    /** Starts LM Studio on the PC (through TokenSaver) if it isn't answering, then makes sure a model is loaded. */
     suspend fun startLocalAI() {
-        if (s.tokenSaverToken.isBlank()) {
-            _state.update { it.copy(startOutput = "Add the TokenSaver link token in Settings to start Local AI from here.") }
-            return
+        _state.update { it.copy(starting = true, startOutput = "") }
+        try {
+            if (!refreshModels()) {
+                // A token problem isn't fixed by starting anything; the banner already says what to do.
+                if (_state.value.lm == Link.NO_TOKEN || _state.value.lm == Link.BAD_TOKEN) return
+                if (s.tokenSaverToken.isBlank()) {
+                    _state.update { it.copy(startOutput = "Add the TokenSaver link token in Settings to start Local AI from here.") }
+                    return
+                }
+                _state.update { it.copy(startOutput = "Starting LM Studio on the PC…") }
+                val out = try {
+                    tokenSaver.run(s.startCommand)
+                } catch (e: ApiException) {
+                    e.message ?: "Couldn't start Local AI"
+                }
+                _state.update { it.copy(startOutput = out.trim().takeLast(600)) }
+                // LM Studio's server can take a little while to answer after starting.
+                val until = clock() + startWaitMs
+                while (!refreshModels() && clock() < until) kotlinx.coroutines.delay(startPollMs)
+                if (_state.value.lm != Link.OK) return
+            }
+            if (_state.value.models.none { it.loaded }) {
+                val key = preferredModel()
+                if (key == null) {
+                    _state.update { it.copy(startOutput = "LM Studio is running but has no chat models downloaded.") }
+                    return
+                }
+                if (!chooseModel(key)) return
+            }
+            // Everything is up: nothing to report, so the card goes away.
+            _state.update { it.copy(startOutput = "", lmMessage = "") }
+        } finally {
+            _state.update { it.copy(starting = false) }
+            pollApprovals()
         }
-        _state.update { it.copy(starting = true, startOutput = "Starting Local AI on the PC…") }
-        val out = try {
-            tokenSaver.run(s.startCommand)
-        } catch (e: ApiException) {
-            e.message ?: "Couldn't start Local AI"
-        }
-        _state.update { it.copy(starting = false, startOutput = out.trim().takeLast(600)) }
-        refreshModels()
-        pollApprovals()
-        // Started fine: nothing to report, so the card goes away. Kept (in red) only when something is still wrong.
-        val st = _state.value
-        if (st.lm == Link.OK && st.model.isNotBlank()) _state.update { it.copy(startOutput = "") }
     }
 
     /** The close button on the status card. */

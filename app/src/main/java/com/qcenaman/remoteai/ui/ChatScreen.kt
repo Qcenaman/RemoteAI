@@ -25,6 +25,10 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -153,29 +157,70 @@ fun ChatScreen(
     }
 }
 
+/** The model button: shows what's loaded on the PC; tapping it lists every model there, and picking one loads it. */
 @Composable
 private fun ModelRow(st: UiState, onModel: (String) -> Unit, onRefresh: () -> Unit) {
-    val loaded = st.models.filter { it.loaded }
     var open by remember { mutableStateOf(false) }
+    val current = st.models.firstOrNull { it.id == st.model }
+    val busyLoading = st.loadingModel.isNotBlank()
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box {
             AssistChip(
-                onClick = { if (loaded.size > 1) open = true else onRefresh() },
+                onClick = { onRefresh(); open = true },
+                enabled = !busyLoading && !st.busy,
+                leadingIcon = {
+                    if (busyLoading) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Memory, null, Modifier.size(18.dp))
+                },
+                trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, Modifier.size(18.dp)) },
                 label = {
                     Text(
-                        st.model.ifBlank { "No model loaded" },
+                        when {
+                            busyLoading -> "Loading ${st.loadingModel}…"
+                            current != null -> current.label
+                            st.model.isNotBlank() -> st.model
+                            else -> "No model loaded · tap to pick"
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 260.dp),
+                        modifier = Modifier.widthIn(max = 240.dp),
                     )
                 },
             )
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                loaded.forEach { m ->
-                    DropdownMenuItem(text = { Text(m.id) }, onClick = { onModel(m.id); open = false })
+                if (st.models.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text(if (st.lm == Link.OK) "No chat models on the PC" else "Can't reach LM Studio · tap to retry") },
+                        onClick = { onRefresh() },
+                    )
+                }
+                st.models.forEach { m ->
+                    val active = m.id == st.model && m.loaded
+                    DropdownMenuItem(
+                        leadingIcon = {
+                            Icon(if (active) Icons.Default.CheckCircle else if (m.loaded) Icons.Default.Memory else Icons.Default.Download,
+                                null, Modifier.size(18.dp),
+                                tint = if (m.loaded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        },
+                        text = {
+                            Column {
+                                Text(m.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    listOfNotNull(
+                                        if (m.loaded) "loaded" else "tap to load",
+                                        m.contextLength.takeIf { it > 0 }?.let { "${it / 1024}k context" },
+                                        m.sizeBytes.takeIf { it > 0 }?.let { String.format(java.util.Locale.US, "%.1f GB", it / 1e9) },
+                                    ).joinToString(" · "),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        },
+                        onClick = { open = false; if (!active) onModel(m.key) },
+                    )
                 }
             }
         }
@@ -220,7 +265,7 @@ private fun StatusBanner(st: UiState, onRefresh: () -> Unit, onStart: () -> Unit
                 if (tokenProblem) TextButton(onClick = onSettings) { Text("Settings") }
                 TextButton(onClick = onRefresh) { Text("Retry") }
                 if (canStart || st.starting) {
-                    Button(onClick = onStart, enabled = !st.starting) {
+                    Button(onClick = onStart, enabled = !st.starting && st.loadingModel.isBlank()) {
                         if (st.starting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         else Text("Start Local AI")
                     }
