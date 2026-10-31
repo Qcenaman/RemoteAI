@@ -245,7 +245,7 @@ private fun ItemView(item: ChatItem) {
         }
         "assistant" -> Column(Modifier.fillMaxWidth()) {
             if (item.reasoning.isNotBlank()) Collapsible("Thinking", item.reasoning)
-            if (item.text.isNotBlank()) SelectionContainer { Text(item.text, Modifier.padding(4.dp)) }
+            if (item.text.isNotBlank()) SelectionContainer { MarkdownText(item.text, Modifier.padding(4.dp)) }
         }
         "tool" -> ToolView(item)
         else -> Text(
