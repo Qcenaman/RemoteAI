@@ -167,7 +167,7 @@ class ControllerTest {
         c.send("build my app")
         val items = c.state.value.conversation.items
         assertTrue(items.any { it.role == "tool" && it.args.contains("gradle build") })
-        assertEquals(listOf("de7d0534"), c.state.value.pending.map { it.id })
+        assertTrue(items.any { it.role == "note" && it.text.contains("Connection dropped") })
         assertEquals(Link.OFFLINE, c.state.value.lm)
 
         sse = null
