@@ -32,7 +32,11 @@ jobs:
           REMOTEAI_KEYSTORE_PASSWORD: ${{ secrets.REMOTEAI_KEYSTORE_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon testDebugUnitTest assembleDebug
+          set -o pipefail
+          ./gradlew --no-daemon testDebugUnitTest assembleDebug 2>&1 | tee gradle.log || {
+            grep -E '^e: |FAILED|Exception|expected:|What went wrong' -A2 gradle.log | head -60 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         if: always()
