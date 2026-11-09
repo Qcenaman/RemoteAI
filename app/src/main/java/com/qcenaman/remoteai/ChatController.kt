@@ -14,7 +14,9 @@ import com.qcenaman.remoteai.net.HUB_STARTED
 import com.qcenaman.remoteai.net.HubClient
 import com.qcenaman.remoteai.net.HubState
 import com.qcenaman.remoteai.net.LmStudioClient
-import com.qcenaman.remoteai.net.hubMessages
+import com.qcenaman.remoteai.net.OPENCODE_PASSWORD
+import com.qcenaman.remoteai.net.OpenCodeClient
+import com.qcenaman.remoteai.net.openCodeLinkCommand
 import com.qcenaman.remoteai.net.hubStartCommand
 import com.qcenaman.remoteai.net.ModelInfo
 import com.qcenaman.remoteai.net.ReplyStats
@@ -63,6 +65,7 @@ class ChatController(
     approvalFactory: ((() -> String), (() -> String)) -> ApprovalClient = { b, t -> ApprovalClient(b, t) },
     tokenSaverFactory: ((() -> String), (() -> String)) -> TokenSaverClient = { b, t -> TokenSaverClient(b, t) },
     hubFactory: (() -> String) -> HubClient = { b -> HubClient(b) },
+    openCodeFactory: ((() -> String), (() -> String)) -> OpenCodeClient = { b, p -> OpenCodeClient(b, p) },
     private val clock: () -> Long = System::currentTimeMillis,
     /** How long Start Local AI waits for LM Studio to answer after starting it. */
     private val startWaitMs: Long = 90_000,
@@ -86,6 +89,13 @@ class ChatController(
     private val approvalsApi = approvalFactory({ baseUrl(s.host, s.approvalPort) }, { s.approvalToken })
     private val tokenSaver = tokenSaverFactory({ baseUrl(s.host, s.tokenSaverPort) }, { s.tokenSaverToken })
     private val hub = hubFactory { baseUrl(s.host, s.hubPort) }
+    private val openCode = openCodeFactory({ baseUrl(s.host, s.openCodePort) }, { s.openCodePassword })
+
+    /** OpenCode permission requests on screen: request id -> session. */
+    private val openCodePending = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** False until OpenCode's tailnet address and password were checked since the app started or a call failed. */
+    @Volatile private var openCodeLinked = false
 
     /** Set by Kill so a hub model still loading stops being waited for. */
     @Volatile private var hubLoadCancelled = false
@@ -108,7 +118,7 @@ class ChatController(
     /** Stop button: ends the reply in progress; what arrived is kept, marked (stopped). */
     fun stop() {
         lm.cancel()
-        hub.cancel()
+        openCode.cancel()
     }
 
     /** Resends a message as a fresh attempt (the stopped reply never became part of the model's history). */
@@ -280,7 +290,7 @@ class ChatController(
         }
         try {
             val list = approvalsApi.pending()
-            _state.update { it.copy(pending = list, approvals = Link.OK) }
+            _state.update { it.copy(pending = list + it.pending.filter { a -> openCodePending.containsKey(a.id) }, approvals = Link.OK) }
         } catch (e: ApiException) {
             _state.update { it.copy(approvals = linkFor(e)) }
         }
@@ -324,18 +334,15 @@ class ChatController(
                         note(st.lmMessage.ifBlank { "Can't reach LM Studio." })
                     }
                     st.model.isBlank() -> note("No model is loaded on the PC. Tap the model button to pick one.")
+                    st.models.any { it.id == st.model && it.hub } -> sendToOpenCode(st, input)
                     else -> {
                         val convId = st.conversation.id
                         val missed = lost[convId].orEmpty()
                         val sent = if (missed.isEmpty()) input else lostContext(missed) + input
                         try {
                             val dog = Watchdog(s.stopThinkingMinutes * 60_000L, clock)
-                            val hubModel = st.models.firstOrNull { it.id == st.model && it.hub }
-                            val reply = if (hubModel != null) {
-                                hub.chat(st.model, hubMessages(st.conversation.items.dropLast(1), sent, hubModel.contextLength), s.maxReplyTokens, dog)
-                            } else {
-                                lm.chat(st.model, sent, st.conversation.responseId, s.maxReplyTokens, dog)
-                            }
+                            val previous = st.conversation.responseId?.takeUnless { it.startsWith("ses_") }
+                            val reply = lm.chat(st.model, sent, previous, s.maxReplyTokens, dog)
                             lost.remove(convId)
                             if (s.maxReplyTokens > 0 && reply.text.isBlank() && reply.toolCalls.isEmpty() && reply.reasoning.isNotBlank()) {
                                 // Ran out of tokens while still thinking: keep it on screen only, not in the model's history.
@@ -378,6 +385,63 @@ class ChatController(
         }
         pollApprovals()
         for (id in retry) send("I approved $id.${approvalDetails(id)} Call the pc tool again with the same args plus confirm:\"$id\".")
+    }
+
+    private suspend fun linkOpenCode(): Boolean {
+        if (s.tokenSaverToken.isBlank()) {
+            note("Add the TokenSaver link token in Settings to use this model.")
+            return false
+        }
+        val out = try {
+            runElevated(openCodeLinkCommand(s.openCodePort))
+        } catch (e: ApiException) {
+            note(if (e is ApiException.Network) PC_UNREACHABLE else e.message ?: "Couldn't reach OpenCode")
+            return false
+        }
+        val password = OPENCODE_PASSWORD.find(out)?.groupValues?.get(1)
+        if (password == null) {
+            note("OpenCode isn't running on the PC and couldn't be started. Open one of its desktop shortcuts once.")
+            return false
+        }
+        if (password != s.openCodePassword) {
+            val new = s.copy(openCodePassword = password)
+            settingsStore.save(new)
+            _state.update { it.copy(settings = new) }
+        }
+        openCodeLinked = true
+        return true
+    }
+
+    /** Hub models run through OpenCode on the PC, with its agent and tools; a chat maps to one OpenCode session. */
+    private suspend fun sendToOpenCode(st: UiState, input: String) {
+        if (!openCodeLinked && !linkOpenCode()) return
+        val agent = "elai-" + st.model
+        try {
+            val known = st.conversation.responseId?.takeIf { it.startsWith("ses_") }
+            val session = known ?: openCode.createSession(agent, st.model, s.projectFolder)
+            if (known != null && st.conversation.model != st.model) openCode.switchModel(session, agent, st.model)
+            saveConv { it.copy(responseId = session, model = st.model) }
+            val reply = openCode.send(session, input) { asked ->
+                val ids = asked.map { it.id }.toSet()
+                val gone = openCodePending.keys.filter { it !in ids }
+                gone.forEach { openCodePending.remove(it) }
+                asked.forEach { openCodePending[it.id] = session }
+                _state.update { u -> u.copy(pending = u.pending.filter { it.id !in gone } + asked.filter { a -> u.pending.none { it.id == a.id } }) }
+            }
+            saveReply(reply.copy(responseId = session), st.model)
+        } catch (e: ApiException.Stopped) {
+            saveReply(e.partial, st.model, stopped = true)
+        } catch (e: ApiException) {
+            openCodeLinked = false
+            note(
+                if (e is ApiException.Network) "Lost the connection to OpenCode. It may still be working on the PC; send another message to continue."
+                else e.message ?: "OpenCode request failed"
+            )
+        } finally {
+            val mine = openCodePending.keys.toSet()
+            openCodePending.clear()
+            _state.update { u -> u.copy(pending = u.pending.filter { it.id !in mine }) }
+        }
     }
 
     private fun stoppedNote(reason: StopReason, input: String) {
@@ -453,7 +517,9 @@ class ChatController(
         val inPlace = st0.busy && st0.pending.any { it.id == id && it.waiting }
         var ok = false
         try {
-            if (approve) approvalsApi.approve(id) else approvalsApi.deny(id)
+            val session = openCodePending[id]
+            if (session != null) openCode.reply(session, id, approve)
+            else if (approve) approvalsApi.approve(id) else approvalsApi.deny(id)
             ok = true
         } catch (e: ApiException.NotFound) {
             note("Approval $id expired or was already decided.")
@@ -547,7 +613,7 @@ class ChatController(
         hubLoadCancelled = true
         if (_state.value.busy) { // the reply in progress ends as stopped, not as a dropped connection
             lm.cancel()
-            hub.cancel()
+            openCode.cancel()
         }
         val out = try {
             runElevated(killCommand())

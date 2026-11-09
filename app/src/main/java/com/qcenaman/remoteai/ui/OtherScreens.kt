@@ -77,6 +77,8 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
     var host by remember { mutableStateOf(s.host) }
     var lmPort by remember { mutableStateOf(s.lmPort.toString()) }
     var hubPort by remember { mutableStateOf(s.hubPort.toString()) }
+    var ocPort by remember { mutableStateOf(s.openCodePort.toString()) }
+    var folder by remember { mutableStateOf(s.projectFolder) }
     var apPort by remember { mutableStateOf(s.approvalPort.toString()) }
     var tsPort by remember { mutableStateOf(s.tokenSaverPort.toString()) }
     var lmToken by remember { mutableStateOf(s.lmToken) }
@@ -102,6 +104,9 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
             Field("API token (RemoteAI)", lmToken, secret = true) { lmToken = it }
             Section("Model hub (Coder, DeepSeek, Ripple)")
             Field("Port", hubPort, number = true) { hubPort = it }
+            Section("OpenCode")
+            Field("Project folder for new chats", folder) { folder = it }
+            Field("Port", ocPort, number = true) { ocPort = it }
             Section("ContextSaver approvals")
             Field("Port", apPort, number = true) { apPort = it }
             Field("Approval token", apToken, secret = true) { apToken = it }
@@ -119,6 +124,9 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
                             host = host.trim(),
                             lmPort = lmPort.toIntOrNull() ?: s.lmPort,
                             hubPort = hubPort.toIntOrNull() ?: s.hubPort,
+                            openCodePort = ocPort.toIntOrNull() ?: s.openCodePort,
+                            openCodePassword = s.openCodePassword,
+                            projectFolder = folder.trim().ifBlank { s.projectFolder },
                             approvalPort = apPort.toIntOrNull() ?: s.approvalPort,
                             tokenSaverPort = tsPort.toIntOrNull() ?: s.tokenSaverPort,
                             lmToken = lmToken.trim(),

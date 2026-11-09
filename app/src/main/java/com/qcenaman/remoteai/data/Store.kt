@@ -13,6 +13,11 @@ data class Settings(
     val host: String = "100.109.168.97",
     val lmPort: Int = 1234,
     val hubPort: Int = 8080,
+    val openCodePort: Int = 4096,
+    /** Fetched from the PC through TokenSaver; never typed. */
+    val openCodePassword: String = "",
+    /** Folder new OpenCode chats work in. */
+    val projectFolder: String = "D:\\Local Projects",
     val approvalPort: Int = 1235,
     val tokenSaverPort: Int = 8766,
     val lmToken: String = "",
@@ -48,6 +53,9 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             host = prefs.getString("host", d.host) ?: d.host,
             lmPort = prefs.getInt("lmPort", d.lmPort),
             hubPort = prefs.getInt("hubPort", d.hubPort),
+            openCodePort = prefs.getInt("openCodePort", d.openCodePort),
+            openCodePassword = prefs.getString("openCodePassword", "") ?: "",
+            projectFolder = prefs.getString("projectFolder", d.projectFolder) ?: d.projectFolder,
             approvalPort = prefs.getInt("approvalPort", d.approvalPort),
             tokenSaverPort = prefs.getInt("tokenSaverPort", d.tokenSaverPort),
             lmToken = prefs.getString("lmToken", "") ?: "",
@@ -65,6 +73,9 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             .putString("host", s.host.trim())
             .putInt("lmPort", s.lmPort)
             .putInt("hubPort", s.hubPort)
+            .putInt("openCodePort", s.openCodePort)
+            .putString("openCodePassword", s.openCodePassword)
+            .putString("projectFolder", s.projectFolder.trim())
             .putInt("approvalPort", s.approvalPort)
             .putInt("tokenSaverPort", s.tokenSaverPort)
             .putString("lmToken", s.lmToken.trim())
