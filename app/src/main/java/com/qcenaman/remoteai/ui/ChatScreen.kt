@@ -224,6 +224,7 @@ private fun ModelRow(
                                 Text(
                                     listOfNotNull(
                                         if (m.loaded) "loaded" else "tap to load",
+                                        if (m.hub) "no PC tools" else null,
                                         m.contextLength.takeIf { it > 0 }?.let { "${it / 1024}k context" },
                                         m.sizeBytes.takeIf { it > 0 }?.let { String.format(java.util.Locale.US, "%.1f GB", it / 1e9) },
                                     ).joinToString(" · "),

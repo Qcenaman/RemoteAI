@@ -9,7 +9,13 @@ import com.qcenaman.remoteai.net.ApiException
 import com.qcenaman.remoteai.net.Approval
 import com.qcenaman.remoteai.net.ApprovalClient
 import com.qcenaman.remoteai.net.ChatReply
+import com.qcenaman.remoteai.net.HUB_PRESETS
+import com.qcenaman.remoteai.net.HUB_STARTED
+import com.qcenaman.remoteai.net.HubClient
+import com.qcenaman.remoteai.net.HubState
 import com.qcenaman.remoteai.net.LmStudioClient
+import com.qcenaman.remoteai.net.hubMessages
+import com.qcenaman.remoteai.net.hubStartCommand
 import com.qcenaman.remoteai.net.ModelInfo
 import com.qcenaman.remoteai.net.ReplyStats
 import com.qcenaman.remoteai.net.estimateTokens
@@ -56,12 +62,14 @@ class ChatController(
     lmFactory: ((() -> String), (() -> String)) -> LmStudioClient = { b, t -> LmStudioClient(b, t) },
     approvalFactory: ((() -> String), (() -> String)) -> ApprovalClient = { b, t -> ApprovalClient(b, t) },
     tokenSaverFactory: ((() -> String), (() -> String)) -> TokenSaverClient = { b, t -> TokenSaverClient(b, t) },
+    hubFactory: (() -> String) -> HubClient = { b -> HubClient(b) },
     private val clock: () -> Long = System::currentTimeMillis,
     /** How long Start Local AI waits for LM Studio to answer after starting it. */
     private val startWaitMs: Long = 90_000,
     private val startPollMs: Long = 3_000,
     /** Pause between killing and starting again, so the GPU memory is really free. */
     private val restartGapMs: Long = 3_000,
+    private val hubPollMs: Long = 5_000,
 ) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -77,6 +85,10 @@ class ChatController(
     private val lm = lmFactory({ baseUrl(s.host, s.lmPort) }, { s.lmToken })
     private val approvalsApi = approvalFactory({ baseUrl(s.host, s.approvalPort) }, { s.approvalToken })
     private val tokenSaver = tokenSaverFactory({ baseUrl(s.host, s.tokenSaverPort) }, { s.tokenSaverToken })
+    private val hub = hubFactory { baseUrl(s.host, s.hubPort) }
+
+    /** Set by Kill so a hub model still loading stops being waited for. */
+    @Volatile private var hubLoadCancelled = false
 
     init {
         val all = store.all()
@@ -94,7 +106,10 @@ class ChatController(
     }
 
     /** Stop button: ends the reply in progress; what arrived is kept, marked (stopped). */
-    fun stop() = lm.cancel()
+    fun stop() {
+        lm.cancel()
+        hub.cancel()
+    }
 
     /** Resends a message as a fresh attempt (the stopped reply never became part of the model's history). */
     suspend fun retry(text: String) = send(text)
@@ -112,10 +127,14 @@ class ChatController(
             rememberModel(m.key)
             return true
         }
+        if (m?.hub == true) return chooseHubModel(m)
         val label = m?.label ?: key
         _state.update { it.copy(loadingModel = label) }
         return try {
-            _state.value.models.filter { it.loaded && it.key != key }.forEach { lm.unload(it.id) }
+            _state.value.models.filter { it.loaded && it.hub }.forEach { h ->
+                try { hub.unload(h.id) } catch (e: ApiException) { /* the hub may already be gone */ }
+            }
+            _state.value.models.filter { it.loaded && !it.hub && it.key != key }.forEach { lm.unload(it.id) }
             val id = lm.load(m?.key ?: key)
             refreshModels()
             _state.update { st -> st.copy(model = st.models.firstOrNull { it.id == id || it.key == key && it.loaded }?.id ?: id) }
@@ -123,6 +142,52 @@ class ChatController(
             true
         } catch (e: ApiException) {
             _state.update { it.copy(lm = linkFor(e), lmMessage = "Couldn't load $label: ${e.message}") }
+            false
+        } finally {
+            _state.update { it.copy(loadingModel = "") }
+        }
+    }
+
+    /** Puts a hub model on the PC the way its desktop shortcut does, then waits until it answers. */
+    private suspend fun chooseHubModel(m: ModelInfo): Boolean {
+        val preset = HUB_PRESETS.first { it.id == m.key }
+        if (s.tokenSaverToken.isBlank()) {
+            _state.update { it.copy(startOutput = "Add the TokenSaver link token in Settings to load ${m.label} from here.") }
+            return false
+        }
+        hubLoadCancelled = false
+        _state.update { it.copy(loadingModel = m.label, startOutput = "") }
+        return try {
+            for (other in _state.value.models.filter { it.loaded && !it.hub }) {
+                try { lm.unload(other.id) } catch (e: ApiException) { /* LM Studio may be closed */ }
+            }
+            val out = runElevated(hubStartCommand(preset))
+            if (!out.contains(HUB_STARTED)) {
+                _state.update { it.copy(startOutput = "Couldn't start ${m.label}: ${out.trim().takeLast(400)}") }
+                return false
+            }
+            val until = clock() + preset.loadMinutes * 60_000L
+            while (true) {
+                val state = try { hub.states()[preset.id] } catch (e: ApiException) { null }
+                if (state == HubState.LOADED) break
+                val problem = when {
+                    hubLoadCancelled -> "Loading ${m.label} was stopped."
+                    state == HubState.FAILED -> "${m.label} failed to load on the PC. Open the minimized ELAI hub window to see why."
+                    clock() > until -> "${m.label} didn't finish loading within ${preset.loadMinutes} min."
+                    else -> null
+                }
+                if (problem != null) {
+                    _state.update { it.copy(startOutput = problem) }
+                    return false
+                }
+                kotlinx.coroutines.delay(hubPollMs)
+            }
+            refreshModels()
+            _state.update { it.copy(model = preset.id) }
+            rememberModel(preset.id)
+            true
+        } catch (e: ApiException) {
+            _state.update { it.copy(startOutput = if (e is ApiException.Network) PC_UNREACHABLE else "Couldn't load ${m.label}: ${e.message}") }
             false
         } finally {
             _state.update { it.copy(loadingModel = "") }
@@ -142,7 +207,7 @@ class ChatController(
         return listOf(s.lastModel, _state.value.conversation.model)
             .filter { it.isNotBlank() }
             .firstNotNullOfOrNull { want -> ms.firstOrNull { it.key == want || it.id == want }?.key }
-            ?: ms.firstOrNull()?.key
+            ?: ms.firstOrNull { !it.hub }?.key
     }
 
     fun newConversation() = _state.update { it.copy(conversation = newConv()) }
@@ -169,29 +234,43 @@ class ChatController(
     }
 
     suspend fun refreshModels(): Boolean {
-        if (s.lmToken.isBlank()) {
-            _state.update { it.copy(lm = Link.NO_TOKEN) }
-            return false
+        val hubStates = try { hub.states() } catch (e: ApiException) { emptyMap() }
+        val hubModels = HUB_PRESETS.map {
+            ModelInfo(it.id, hubStates[it.id] == HubState.LOADED, it.contextLength, name = it.label, hub = true)
         }
-        return try {
-            val ms = lm.models()
+        val hubRunning = hubModels.any { it.loaded }
+        var lmError: ApiException? = null
+        val lmModels = if (s.lmToken.isBlank()) null else try {
+            lm.models()
+        } catch (e: ApiException) {
+            lmError = e
+            null
+        }
+        if (lmModels == null && !hubRunning) {
+            val error = lmError
             _state.update { st ->
-                val loaded = ms.filter { it.loaded }
-                val keep = loaded.any { it.id == st.model }
                 st.copy(
-                    models = ms,
-                    model = if (keep) st.model else loaded.firstOrNull()?.id ?: "",
-                    lm = Link.OK,
-                    lmMessage = if (loaded.isEmpty()) "No model loaded on the PC. Tap the model button to pick one." else "",
-                    // Retry found everything up: an old Start Local AI output has nothing left to report.
-                    startOutput = if (loaded.isNotEmpty() && !st.starting) "" else st.startOutput,
+                    models = st.models.filter { !it.hub } + hubModels,
+                    lm = if (error != null) linkFor(error) else Link.NO_TOKEN,
+                    lmMessage = error?.message.orEmpty(),
                 )
             }
-            true
-        } catch (e: ApiException) {
-            _state.update { it.copy(lm = linkFor(e), lmMessage = e.message ?: "") }
-            false
+            return false
         }
+        val ms = lmModels.orEmpty() + hubModels
+        _state.update { st ->
+            val loaded = ms.filter { it.loaded }
+            val keep = loaded.any { it.id == st.model }
+            st.copy(
+                models = ms,
+                model = if (keep) st.model else loaded.firstOrNull()?.id ?: "",
+                lm = Link.OK,
+                lmMessage = if (loaded.isEmpty()) "No model loaded on the PC. Tap the model button to pick one." else "",
+                // Retry found everything up: an old Start Local AI output has nothing left to report.
+                startOutput = if (loaded.isNotEmpty() && !st.starting) "" else st.startOutput,
+            )
+        }
+        return true
     }
 
     suspend fun pollApprovals() {
@@ -251,7 +330,12 @@ class ChatController(
                         val sent = if (missed.isEmpty()) input else lostContext(missed) + input
                         try {
                             val dog = Watchdog(s.stopThinkingMinutes * 60_000L, clock)
-                            val reply = lm.chat(st.model, sent, st.conversation.responseId, s.maxReplyTokens, dog)
+                            val hubModel = st.models.firstOrNull { it.id == st.model && it.hub }
+                            val reply = if (hubModel != null) {
+                                hub.chat(st.model, hubMessages(st.conversation.items.dropLast(1), sent, hubModel.contextLength), s.maxReplyTokens, dog)
+                            } else {
+                                lm.chat(st.model, sent, st.conversation.responseId, s.maxReplyTokens, dog)
+                            }
                             lost.remove(convId)
                             if (s.maxReplyTokens > 0 && reply.text.isBlank() && reply.toolCalls.isEmpty() && reply.reasoning.isNotBlank()) {
                                 // Ran out of tokens while still thinking: keep it on screen only, not in the model's history.
@@ -396,7 +480,15 @@ class ChatController(
     suspend fun startLocalAI() {
         _state.update { it.copy(starting = true, startOutput = "") }
         try {
-            if (!refreshModels()) {
+            val lmUp = refreshModels()
+            if (_state.value.models.none { it.loaded }) {
+                val hubLast = HUB_PRESETS.firstOrNull { it.id == s.lastModel }
+                if (hubLast != null) {
+                    if (chooseModel(hubLast.id)) _state.update { it.copy(startOutput = "", lmMessage = "") }
+                    return
+                }
+            }
+            if (!lmUp) {
                 // A token problem isn't fixed by starting anything; the banner already says what to do.
                 if (_state.value.lm == Link.NO_TOKEN || _state.value.lm == Link.BAD_TOKEN) return
                 if (s.tokenSaverToken.isBlank()) {
@@ -452,7 +544,11 @@ class ChatController(
             _state.update { it.copy(startOutput = "Add the TokenSaver link token in Settings to kill or restart Local AI from here.") }
             return false
         }
-        if (_state.value.busy) lm.cancel() // the reply in progress ends as stopped, not as a dropped connection
+        hubLoadCancelled = true
+        if (_state.value.busy) { // the reply in progress ends as stopped, not as a dropped connection
+            lm.cancel()
+            hub.cancel()
+        }
         val out = try {
             runElevated(killCommand())
         } catch (e: ApiException) {

@@ -106,6 +106,8 @@ data class ModelInfo(
     val key: String = id,
     val name: String = "",
     val sizeBytes: Long = 0,
+    /** Served by the ELAI hub instead of LM Studio. */
+    val hub: Boolean = false,
 ) {
     val label: String get() = name.ifBlank { key }
 }

@@ -76,6 +76,7 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
     val s = st.settings
     var host by remember { mutableStateOf(s.host) }
     var lmPort by remember { mutableStateOf(s.lmPort.toString()) }
+    var hubPort by remember { mutableStateOf(s.hubPort.toString()) }
     var apPort by remember { mutableStateOf(s.approvalPort.toString()) }
     var tsPort by remember { mutableStateOf(s.tokenSaverPort.toString()) }
     var lmToken by remember { mutableStateOf(s.lmToken) }
@@ -99,6 +100,8 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
             Section("LM Studio")
             Field("Port", lmPort, number = true) { lmPort = it }
             Field("API token (RemoteAI)", lmToken, secret = true) { lmToken = it }
+            Section("Model hub (Coder, DeepSeek, Ripple)")
+            Field("Port", hubPort, number = true) { hubPort = it }
             Section("ContextSaver approvals")
             Field("Port", apPort, number = true) { apPort = it }
             Field("Approval token", apToken, secret = true) { apToken = it }
@@ -115,6 +118,7 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
                         Settings(
                             host = host.trim(),
                             lmPort = lmPort.toIntOrNull() ?: s.lmPort,
+                            hubPort = hubPort.toIntOrNull() ?: s.hubPort,
                             approvalPort = apPort.toIntOrNull() ?: s.approvalPort,
                             tokenSaverPort = tsPort.toIntOrNull() ?: s.tokenSaverPort,
                             lmToken = lmToken.trim(),

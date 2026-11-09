@@ -12,6 +12,7 @@ import java.io.File
 data class Settings(
     val host: String = "100.109.168.97",
     val lmPort: Int = 1234,
+    val hubPort: Int = 8080,
     val approvalPort: Int = 1235,
     val tokenSaverPort: Int = 8766,
     val lmToken: String = "",
@@ -46,6 +47,7 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
         return Settings(
             host = prefs.getString("host", d.host) ?: d.host,
             lmPort = prefs.getInt("lmPort", d.lmPort),
+            hubPort = prefs.getInt("hubPort", d.hubPort),
             approvalPort = prefs.getInt("approvalPort", d.approvalPort),
             tokenSaverPort = prefs.getInt("tokenSaverPort", d.tokenSaverPort),
             lmToken = prefs.getString("lmToken", "") ?: "",
@@ -62,6 +64,7 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
         prefs.edit()
             .putString("host", s.host.trim())
             .putInt("lmPort", s.lmPort)
+            .putInt("hubPort", s.hubPort)
             .putInt("approvalPort", s.approvalPort)
             .putInt("tokenSaverPort", s.tokenSaverPort)
             .putString("lmToken", s.lmToken.trim())

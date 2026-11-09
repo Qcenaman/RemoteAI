@@ -31,7 +31,7 @@ sealed class ApiException(message: String) : Exception(message) {
 }
 
 /** Thrown inside a request to end it on purpose; never retried as a connect failure. */
-private class StopSignal(val reason: StopReason) : IOException("stopped")
+internal class StopSignal(val reason: StopReason) : IOException("stopped")
 
 private val jsonType = "application/json".toMediaType()
 

@@ -95,7 +95,7 @@ class ControllerTest {
     }
 
     private fun controller(lmToken: String = "lmtok", apToken: String = "aptok", maxTokens: Int = 8192) = ChatController(
-        FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, lmToken = lmToken, approvalToken = apToken,
+        FakeSettings(Settings(host = "127.0.0.1", hubPort = 1, lmPort = lm.port, approvalPort = ap.port, lmToken = lmToken, approvalToken = apToken,
             maxReplyTokens = maxTokens)),
         MemoryConversationStore(),
     )
@@ -326,7 +326,7 @@ class ControllerTest {
             start()
         }
         val c = ChatController(
-            FakeSettings(Settings(host = "127.0.0.1", lmPort = pc.port, approvalPort = ap.port, tokenSaverPort = pc.port,
+            FakeSettings(Settings(host = "127.0.0.1", hubPort = 1, lmPort = pc.port, approvalPort = ap.port, tokenSaverPort = pc.port,
                 lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
             MemoryConversationStore(),
             startWaitMs = 2_000, startPollMs = 50,
@@ -335,7 +335,7 @@ class ControllerTest {
         val st = c.state.value
         assertEquals(listOf("""{"model":"qwen/qwen3.6-27b"}"""), loads.toList())
         assertEquals("qwen3.6-27b", st.model)
-        assertEquals(32768, st.models.single().contextLength)
+        assertEquals(32768, st.models.single { !it.hub }.contextLength)
         assertEquals("", st.startOutput)
         assertEquals("qwen/qwen3.6-27b", st.settings.lastModel)
         pc.shutdown()
@@ -349,7 +349,7 @@ class ControllerTest {
         }
         lmCode = 503
         val c = ChatController(
-            FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, tokenSaverPort = ts.port,
+            FakeSettings(Settings(host = "127.0.0.1", hubPort = 1, lmPort = lm.port, approvalPort = ap.port, tokenSaverPort = ts.port,
                 lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
             MemoryConversationStore(),
             startWaitMs = 0,
@@ -368,7 +368,7 @@ class ControllerTest {
     @Test
     fun startLocalAISaysThePcIsUnreachableWhenTokenSaverDoesNotAnswer() = runBlocking {
         val c = ChatController(
-            FakeSettings(Settings(host = "127.0.0.1", lmPort = closedPort(), approvalPort = ap.port, tokenSaverPort = closedPort(),
+            FakeSettings(Settings(host = "127.0.0.1", hubPort = 1, lmPort = closedPort(), approvalPort = ap.port, tokenSaverPort = closedPort(),
                 lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
             MemoryConversationStore(),
             startWaitMs = 0,
@@ -398,7 +398,7 @@ class ControllerTest {
             start()
         }
         val c = ChatController(
-            FakeSettings(Settings(host = "127.0.0.1", lmPort = lm.port, approvalPort = ap.port, tokenSaverPort = ts.port,
+            FakeSettings(Settings(host = "127.0.0.1", hubPort = 1, lmPort = lm.port, approvalPort = ap.port, tokenSaverPort = ts.port,
                 lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok")),
             MemoryConversationStore(),
         )
@@ -454,7 +454,7 @@ class ControllerTest {
             start()
         }
         val c = ChatController(
-            FakeSettings(Settings(host = "127.0.0.1", lmPort = pc.port, approvalPort = ap.port, tokenSaverPort = pc.port,
+            FakeSettings(Settings(host = "127.0.0.1", hubPort = 1, lmPort = pc.port, approvalPort = ap.port, tokenSaverPort = pc.port,
                 lmToken = "lmtok", approvalToken = "aptok", tokenSaverToken = "tstok", lastModel = "qwen/qwen3.6-27b")),
             MemoryConversationStore(),
             startWaitMs = 2_000, startPollMs = 50, restartGapMs = 0,
