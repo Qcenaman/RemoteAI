@@ -142,6 +142,13 @@ fun ChatScreen(
             LaunchedEffect(st.conversation.items.size, st.conversation.id) {
                 if (st.conversation.items.isNotEmpty()) list.animateScrollToItem(st.conversation.items.size - 1)
             }
+            // Following a PC: keep the newest words in view as they stream in, unless the user scrolled up to read.
+            val tail = st.conversation.items.lastOrNull()
+            LaunchedEffect(tail?.text?.length, tail?.reasoning?.length) {
+                val last = st.conversation.items.lastIndex
+                val seen = list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                if (st.pc != null && last >= 0 && seen >= last - 1 && !list.isScrollInProgress) list.scrollToItem(last, Int.MAX_VALUE / 2)
+            }
             LazyColumn(
                 state = list,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -161,7 +168,7 @@ fun ChatScreen(
                 val lastRetry = st.conversation.items.indexOfLast { it.retry.isNotBlank() }
                     .takeIf { it == st.conversation.items.lastIndex }
                 itemsIndexed(st.conversation.items) { i, item ->
-                    ItemView(item, st.conversation.title, onRetry.takeIf { i == lastRetry && !st.busy })
+                    ItemView(item, st.conversation.title, onRetry.takeIf { i == lastRetry && !st.busy }, showThinking = st.pc != null)
                 }
             }
             val working = st.busy || st.pcWorking
@@ -433,7 +440,7 @@ private fun ApprovalCard(a: Approval, deciding: Boolean, onApprove: (String) -> 
 }
 
 @Composable
-private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?) {
+private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?, showThinking: Boolean = false) {
     when (item.role) {
         "user" -> Column(Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
@@ -452,7 +459,7 @@ private fun ItemView(item: ChatItem, title: String, onRetry: ((String) -> Unit)?
             }
         }
         "assistant" -> Column(Modifier.fillMaxWidth()) {
-            if (item.reasoning.isNotBlank()) Thinking(item.reasoning, title)
+            if (item.reasoning.isNotBlank()) Thinking(item.reasoning, title, startOpen = showThinking || item.streaming)
             if (item.text.isNotBlank()) SelectionContainer { MarkdownText(item.text, Modifier.padding(4.dp)) }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 val line = item.stats?.let { replyLine(it) }.orEmpty()
@@ -550,8 +557,8 @@ private fun ToolView(item: ChatItem) {
 }
 
 @Composable
-private fun Thinking(text: String, title: String) {
-    var open by rememberSaveable { mutableStateOf(false) }
+private fun Thinking(text: String, title: String, startOpen: Boolean = false) {
+    var open by rememberSaveable { mutableStateOf(startOpen) }
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->

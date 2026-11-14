@@ -137,6 +137,54 @@ class PcLiveTest {
     }
 
     @Test
+    fun thinkingAndTextStreamInLiveLikeOnThePcWindow() = runBlocking {
+        val ev = { type: String, data: String -> "data: {\"id\":\"e\",\"type\":\"$type\",\"data\":$data}\n\n" }
+        val m = "\"sessionID\":\"ses_old\",\"assistantMessageID\":\"msg_9\",\"ordinal\":0"
+        val stream = ev("server.connected", "{}") + ": heartbeat\n\n" +
+            ev("session.reasoning.delta", "{$m,\"delta\":\"Let me\"}") +
+            ev("session.reasoning.delta", "{$m,\"delta\":\" check\"}") +
+            ev("session.reasoning.delta", "{\"sessionID\":\"ses_other\",\"assistantMessageID\":\"x\",\"ordinal\":0,\"delta\":\"not this\"}") +
+            ev("session.tool.input.started", "{$m,\"id\":\"t1\",\"name\":\"write\"}") +
+            ev("session.tool.input.delta", "{$m,\"id\":\"t1\",\"delta\":\"abcde\"}") +
+            ev("session.text.delta", "{$m,\"delta\":\"Two issues:\"}")
+        val laptop = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val path = request.path!!
+                    return when {
+                        path == "/mcp" -> MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"OCPW:lpw"}]}}""")
+                        path.startsWith("/api/session?") -> MockResponse().setBody(sessions)
+                        path == "/api/session/active" -> MockResponse().setBody("""{"data":{"ses_old":{}}}""")
+                        path == "/api/session/ses_old/permission" -> MockResponse().setBody("""{"data":[]}""")
+                        path.startsWith("/api/session/ses_old/message") -> MockResponse().setBody(
+                            """{"data":[{"id":"msg_9","type":"assistant","content":[{"type":"reasoning","text":""},{"type":"tool","name":"write","state":{"status":"streaming"}}]},{"id":"m1","type":"user","text":"go"}]}""")
+                        path == "/api/event" -> MockResponse().setHeader("Content-Type", "text/event-stream").setBody(stream)
+                        else -> MockResponse().setResponseCode(404)
+                    }
+                }
+            }
+            start()
+        }
+        try {
+            val settings = FakeSettings(Settings(lmPort = 1, approvalPort = 1, tokenSaverPort = 1, hubPort = 1,
+                laptopHost = "127.0.0.1", laptopTokenSaverPort = laptop.port, laptopOpenCodePort = laptop.port, laptopTokenSaverToken = "lt"))
+            val c = ChatController(settings, MemoryConversationStore())
+            assertTrue(c.selectPc(Pc.LAPTOP))
+            // Saved so far: the prompt and a tool still being written (not a failure).
+            assertEquals("(writing its input…)", c.state.value.conversation.items.single { it.role == "tool" }.text)
+            c.streamLive()
+            val live = c.state.value.conversation.items.filter { it.streaming }
+            assertEquals("Let me check", live[0].reasoning)
+            assertEquals("write", live[1].tool)
+            assertTrue(live[1].text.contains("5 characters"))
+            assertEquals("Two issues:", live[2].text)
+            assertFalse(c.state.value.conversation.items.any { it.reasoning.contains("not this") })
+        } finally {
+            laptop.shutdown()
+        }
+    }
+
+    @Test
     fun theEchoedCommandIsNotThePassword() {
         assertEquals("pw1", passwordIn("Job 1\n$ echo \"OCPW:\$(cat \"\$HOME/ELAI/remote/password\")\"\nLast 1 of 1 lines:\n  OCPW:pw1"))
         assertNull(passwordIn("$ echo \"OCPW:\$(cat x)\""))

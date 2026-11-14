@@ -1,6 +1,10 @@
 package com.qcenaman.remoteai.net
 
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -169,6 +173,36 @@ class OpenCodeClient(
 
     suspend fun interrupt(session: String) {
         post("/api/session/$session/interrupt")
+    }
+
+    private val streamHttp = http.newBuilder().readTimeout(90, java.util.concurrent.TimeUnit.SECONDS).build()
+
+    /**
+     * Follows OpenCode's live event stream (what its window shows as it happens: thinking and text word by word,
+     * tool progress) until the connection drops or the caller is cancelled.
+     */
+    suspend fun events(onEvent: suspend (type: String, data: JsonObject) -> Unit) = withContext(Dispatchers.IO) {
+        val call = streamHttp.newCall(req("/api/event").header("Accept", "text/event-stream").get().build())
+        val hook = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+        try {
+            call.execute().use { r ->
+                checkStatus(r)
+                val src = r.body?.source() ?: return@use
+                while (true) {
+                    ensureActive()
+                    val line = src.readUtf8Line() ?: break
+                    if (!line.startsWith("data:")) continue
+                    val o = runCatching { json.parseToJsonElement(line.substring(5).trim()) as? JsonObject }.getOrNull() ?: continue
+                    val type = o["type"].text()
+                    if (type.isBlank()) continue
+                    onEvent(type, o["data"] as? JsonObject ?: JsonObject(emptyMap()))
+                }
+            }
+        } catch (e: java.io.IOException) {
+            throw ApiException.Network(server, e)
+        } finally {
+            hook?.dispose()
+        }
     }
 
     @Volatile private var userStop = false

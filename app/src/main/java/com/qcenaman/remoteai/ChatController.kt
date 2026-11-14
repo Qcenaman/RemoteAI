@@ -122,6 +122,13 @@ class ChatController(
     @Volatile private var liveDir = ""
     /** The window's chat is working in a window with its own private OpenCode, which can't take messages mid-turn. */
     @Volatile private var liveElsewhere = false
+
+    /** What the PC is writing right now, from its event stream, shown after the saved chat until it's saved. */
+    private class LivePart(val kind: String, val name: String = "", var text: String = "", var ended: Boolean = false)
+    private val overlay = LinkedHashMap<String, LivePart>()
+    @Volatile private var liveBase: Conversation? = null
+    @Volatile private var refreshWanted = false
+    @Volatile private var lastFetch = 0L
     private val liveLock = Mutex()
 
     /** OpenCode permission requests on screen: request id -> session. */
@@ -741,6 +748,8 @@ class ChatController(
         if (_state.value.pc == null) return
         setPcSetting(null)
         liveSession = null
+        liveBase = null
+        synchronized(overlay) { overlay.clear() }
         _state.update { it.copy(pcQueued = emptyList()) }
         val mine = livePending.keys.toSet()
         livePending.clear()
@@ -877,9 +886,13 @@ class ChatController(
                 liveUpdated = -1
                 return pollLiveLocked()
             }
-            if (win.id != liveSession || win.updated != liveUpdated || working || st0.pcWorking) {
+            val due = (working || st0.pcWorking) && clock() - lastFetch > 10_000
+            if (win.id != liveSession || win.updated != liveUpdated || refreshWanted || due) {
+                refreshWanted = false
+                lastFetch = clock()
                 val items = oc.transcript(win.id)
                 if (_state.value.pc != pc) return // switched away meanwhile
+                if (win.id != liveSession) synchronized(overlay) { overlay.clear() }
                 liveSession = win.id
                 liveUpdated = win.updated
                 liveDir = win.directory
@@ -925,7 +938,76 @@ class ChatController(
             items = items,
         )
         if (items.isNotEmpty()) store.put(conv)
-        _state.update { it.copy(conversation = conv, conversations = store.all()) }
+        // Saved now: what was being written live is in the chat itself.
+        synchronized(overlay) { overlay.values.removeAll { it.ended } }
+        liveBase = conv
+        _state.update { it.copy(conversations = store.all()) }
+        renderLive()
+    }
+
+    private fun renderLive() {
+        val base = liveBase ?: return
+        val live = synchronized(overlay) {
+            overlay.values.filter { it.text.isNotBlank() || it.kind == "tool" }.map {
+                when (it.kind) {
+                    "reasoning" -> ChatItem("assistant", "", reasoning = it.text, streaming = true)
+                    "tool" -> ChatItem("tool", if (it.ended) "(running…)" else "(writing its input… ${it.text.length} characters)",
+                        tool = it.name, streaming = true)
+                    else -> ChatItem("assistant", it.text, streaming = true)
+                }
+            }
+        }
+        _state.update { st -> if (st.pc == null) st else st.copy(conversation = base.copy(items = base.items + live)) }
+    }
+
+    /**
+     * While a PC is followed: its live events, so the phone shows the thinking, text and tools as the PC's window
+     * does instead of waiting for each step to be saved. Returns when the stream drops (the caller reconnects).
+     */
+    suspend fun streamLive() {
+        val pc = _state.value.pc ?: return
+        try {
+            ocFor(pc).events { type, d -> onLiveEvent(pc, type, d) }
+        } catch (e: ApiException) {
+            // the poll reports what's wrong; the caller retries
+        }
+    }
+
+    private suspend fun onLiveEvent(pc: Pc, type: String, d: kotlinx.serialization.json.JsonObject) {
+        if (_state.value.pc != pc) return
+        fun str(k: String) = (d[k] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+        val session = str("sessionID")
+        if (session.isNotBlank() && session != liveSession) {
+            if (type == "session.step.started") { refreshWanted = true; pollLive() } // the window may have moved to another chat
+            return
+        }
+        val key = str("assistantMessageID") + ":" + type.substringAfter("session.").substringBefore(".") + ":" + str("ordinal")
+        var refresh = false
+        synchronized(overlay) {
+            when (type) {
+                "session.reasoning.delta", "session.text.delta" ->
+                    overlay.getOrPut(key) { LivePart(if (type.contains("reasoning")) "reasoning" else "text") }.text += str("delta")
+                "session.reasoning.ended", "session.text.ended" -> overlay[key]?.let { p ->
+                    if (str("text").isNotBlank()) p.text = str("text")
+                    p.ended = true
+                    refresh = true
+                }
+                "session.tool.input.started" -> overlay["tool:" + str("id")] = LivePart("tool", str("name"))
+                "session.tool.input.delta" -> overlay["tool:" + str("id")]?.let { it.text += str("delta") }
+                "session.tool.input.ended", "session.tool.called" -> overlay["tool:" + str("id")]?.let { it.ended = true; refresh = true }
+                "session.tool.success", "session.tool.failed", "session.tool.error", "session.step.ended" -> {
+                    overlay.remove("tool:" + str("id"))
+                    refresh = true
+                }
+                "session.step.started" -> { _state.update { it.copy(pcWorking = true) }; refresh = true }
+                else -> if (type.startsWith("session.") && (type.endsWith(".ended") || type.endsWith(".failed"))) refresh = true
+            }
+        }
+        renderLive()
+        if (refresh) {
+            refreshWanted = true
+            pollLive()
+        }
     }
 
     /** Like typing in the PC's window: the window shows it too, and a busy model gets it at its next turn. */

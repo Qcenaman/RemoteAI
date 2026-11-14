@@ -50,10 +50,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun followPc() {
         if (live?.isActive == true) return
         live = viewModelScope.launch {
+            val stream = launch {
+                while (isActive && foreground && state.value.pc != null) {
+                    controller.streamLive()
+                    delay(3_000) // dropped: reconnect
+                }
+            }
             while (isActive && foreground && state.value.pc != null) {
                 controller.pollLive()
                 delay(2_000)
             }
+            stream.cancel()
         }
     }
 

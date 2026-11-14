@@ -71,11 +71,13 @@ private fun toolText(state: JsonObject?): String {
     val text = parts.joinToString("\n") { (it as? JsonObject)?.get("text").str() }.trim()
     return when (val status = state?.get("status").str()) {
         "completed", "" -> text
-        "running", "pending" -> text.ifBlank { "($status…)" }
-        else -> {
+        "streaming" -> text.ifBlank { "(writing its input…)" }
+        "running", "pending" -> text.ifBlank { "(running…)" }
+        "error", "failed" -> {
             val error = state?.get("error").let { if (it is JsonObject) it["message"].str() else it.str() }
             "Failed: " + error.ifBlank { text.ifBlank { status } }
         }
+        else -> text.ifBlank { "($status…)" }
     }
 }
 

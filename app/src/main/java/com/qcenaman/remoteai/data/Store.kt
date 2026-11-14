@@ -120,6 +120,8 @@ data class ChatItem(
     val retry: String = "",
     /** Tokens, speed and context shown under the message. */
     val stats: com.qcenaman.remoteai.net.ReplyStats? = null,
+    /** Still being written on the PC (live from its event stream). */
+    val streaming: Boolean = false,
 )
 
 @Serializable
