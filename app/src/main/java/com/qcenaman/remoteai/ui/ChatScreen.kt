@@ -109,6 +109,7 @@ fun ChatScreen(
     onDismissStatus: () -> Unit,
     onPc: (Pc) -> Unit,
     onPcGpu: (Pc, String) -> Unit,
+    onCancelPc: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -133,7 +134,7 @@ fun ChatScreen(
                 .imePadding()
         ) {
             ModelRow(st, onModel, onPc, onRefresh, onKillLocalAI, onRestartLocalAI)
-            if (st.pc != null) PcBanner(st, st.pc, onPc, onPcGpu, onSettings, onDismissStatus)
+            if (st.pc != null) PcBanner(st, st.pc, onPc, onPcGpu, onCancelPc, onSettings, onDismissStatus)
             else StatusBanner(st, onRefresh, onStartLocalAI, onSettings, onDismissStatus)
             st.pending.forEach { a -> ApprovalCard(a, a.id in st.deciding, onApprove, onDeny) }
 
@@ -311,7 +312,7 @@ private fun pcIcon(pc: Pc?) = when (pc) {
 
 /** What's going on with the followed PC: starting, unreachable, or something else on the laptop's GPU. */
 @Composable
-private fun PcBanner(st: UiState, pc: Pc, onPc: (Pc) -> Unit, onGpu: (Pc, String) -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) {
+private fun PcBanner(st: UiState, pc: Pc, onPc: (Pc) -> Unit, onGpu: (Pc, String) -> Unit, onCancel: () -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) {
     val text = listOf(st.pcAction, st.pcStatus, st.pcGpuBusy, st.startOutput.takeIf { st.pcConnecting }.orEmpty())
         .filter { it.isNotBlank() }.distinct().joinToString("\n\n")
     if (text.isBlank()) return
@@ -327,6 +328,7 @@ private fun PcBanner(st: UiState, pc: Pc, onPc: (Pc) -> Unit, onGpu: (Pc, String
                 if (connecting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                 Text(text, color = fg, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
                     maxLines = 10, overflow = TextOverflow.Ellipsis)
+                if (st.pcConnecting) TextButton(onClick = onCancel) { Text("Cancel") }
             }
             if (!connecting) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {

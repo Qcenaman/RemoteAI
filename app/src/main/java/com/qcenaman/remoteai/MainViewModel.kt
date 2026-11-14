@@ -57,9 +57,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun selectPc(pc: com.qcenaman.remoteai.net.Pc, gpu: String = "ask") = viewModelScope.launch {
-        controller.selectPc(pc, gpu = gpu)
-        followPc()
+    private var connecting: Job? = null
+
+    /** Picking a PC again (or Cancel) drops a start that is still going, so the app can never stay stuck on it. */
+    fun selectPc(pc: com.qcenaman.remoteai.net.Pc, gpu: String = "ask", start: Boolean = true) {
+        connecting?.cancel()
+        connecting = viewModelScope.launch {
+            controller.selectPc(pc, start = start, gpu = gpu)
+            followPc()
+        }
+    }
+
+    fun cancelConnect() {
+        connecting?.cancel()
+        controller.connectCancelled()
     }
 
     fun stop() = viewModelScope.launch { if (state.value.pc != null) controller.stopPc() else controller.stop() }
@@ -69,7 +80,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         state.value.pc?.let { pc ->
             if (!reconnected) {
                 reconnected = true
-                viewModelScope.launch { controller.selectPc(pc, start = false); followPc() }
+                selectPc(pc, start = false)
             } else followPc()
         }
         ApprovalNotifier.clear(getApplication())

@@ -101,6 +101,7 @@ fun App(vm: MainViewModel) {
             onStop = { vm.stop() },
             onPc = { vm.selectPc(it) },
             onPcGpu = { pc, how -> vm.selectPc(pc, how) },
+            onCancelPc = { vm.cancelConnect() },
             onRetry = { vm.retry(it) },
             onDismissStatus = { vm.dismissStatus() },
         )

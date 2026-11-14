@@ -63,7 +63,13 @@ class PcLiveTest {
     }
 
     @Test
-    fun pickingTheLaptopStartsItThenMirrorsAndSendsIntoItsWindow() = runBlocking {
+    fun pickingTheLaptopStartsItThenMirrorsAndSendsIntoItsWindow() = laptopFlow(elsewhere = false)
+
+    @Test
+    fun workInTheLaptopsOwnWindowIsJoinedAndMessagesWaitForItsTurn() = laptopFlow(elsewhere = true)
+
+    private fun laptopFlow(elsewhere: Boolean) = runBlocking {
+        val idle = java.util.concurrent.atomic.AtomicBoolean(false)
         val mcp = Collections.synchronizedList(mutableListOf<String>())
         val prompts = Collections.synchronizedList(mutableListOf<String>())
         val transcript = java.util.concurrent.atomic.AtomicReference("""{"data":[{"id":"m1","type":"user","text":"hi from the laptop"}]}""")
@@ -77,8 +83,8 @@ class PcLiveTest {
                     }
                     if (request.getHeader("Authorization") != okhttp3.Credentials.basic("opencode", "lpw")) return MockResponse().setResponseCode(401)
                     return when {
-                        path.startsWith("/api/session?") -> MockResponse().setBody(sessions)
-                        path == "/api/session/active" -> MockResponse().setBody("""{"data":{}}""")
+                        path.startsWith("/api/session?") -> MockResponse().setBody(if (idle.get()) sessions.replace("\"idle\":20", "\"idle\":99") else sessions)
+                        path == "/api/session/active" -> MockResponse().setBody(if (elsewhere || idle.get()) """{"data":{}}""" else """{"data":{"ses_old":{}}}""")
                         path == "/api/session/ses_old/permission" -> MockResponse().setBody("""{"data":[{"id":"per_1","action":"bash","resources":["rm x"]}]}""")
                         path.startsWith("/api/session/ses_old/message") -> MockResponse().setBody(transcript.get())
                         path == "/api/session/ses_old/prompt" -> {
@@ -97,7 +103,9 @@ class PcLiveTest {
                 laptopHost = "127.0.0.1", laptopTokenSaverPort = laptop.port, laptopOpenCodePort = laptop.port, laptopTokenSaverToken = "lt"))
             val c = ChatController(settings, MemoryConversationStore(), openCodeFactory = { b, p -> OpenCodeClient(b, p, pollMs = 5) })
             assertTrue(c.selectPc(Pc.LAPTOP))
-            assertTrue(mcp.single().contains("elai-remote"))
+            // Already running: only the password is fetched, nothing is started or restarted.
+            assertTrue(mcp.single().contains("remote/password"))
+            assertFalse(mcp.single().contains("start"))
             assertEquals("laptop", settings.s.pc)
             assertEquals("lpw", settings.s.laptopOpenCodePassword)
             val st = c.state.value
@@ -108,6 +116,14 @@ class PcLiveTest {
             assertEquals("per_1", st.pending.single().id)
 
             c.send("from phone")
+            if (elsewhere) {
+                assertTrue(prompts.isEmpty())
+                assertEquals(listOf("from phone"), c.state.value.pcQueued)
+                assertEquals("note", c.state.value.conversation.items.last().role)
+                idle.set(true) // the window's turn ended
+                c.pollLive()
+                assertTrue(c.state.value.pcQueued.isEmpty())
+            }
             assertTrue(prompts.single().contains("from phone"))
             assertEquals(listOf("hi from the laptop", "from phone"), c.state.value.conversation.items.map { it.text })
 
