@@ -79,7 +79,7 @@ class PcLiveTest {
                     val path = request.path!!
                     if (path == "/mcp") {
                         mcp += request.body.readUtf8()
-                        return MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"Job x: exited\nFolder: /p/a\nREADY\nOCPW:lpw"}]}}""")
+                        return MockResponse().setBody("""{"result":{"content":[{"type":"text","text":"Job x: exited\n$ echo \\\"OCPW:$(cat \\\"${'$'}HOME/ELAI/remote/password\\\")\\\"\nFolder: /p/a\nREADY\nOCPW:lpw"}]}}""")
                     }
                     if (request.getHeader("Authorization") != okhttp3.Credentials.basic("opencode", "lpw")) return MockResponse().setResponseCode(401)
                     return when {
@@ -134,6 +134,12 @@ class PcLiveTest {
         } finally {
             laptop.shutdown()
         }
+    }
+
+    @Test
+    fun theEchoedCommandIsNotThePassword() {
+        assertEquals("pw1", passwordIn("Job 1\n$ echo \"OCPW:\$(cat \"\$HOME/ELAI/remote/password\")\"\nLast 1 of 1 lines:\n  OCPW:pw1"))
+        assertNull(passwordIn("$ echo \"OCPW:\$(cat x)\""))
     }
 
     @Test

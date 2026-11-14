@@ -141,6 +141,11 @@ class ChatController(
             conversations = all,
         )
         _state.update { it.copy(model = it.conversation.model, pc = Pc.of(it.settings.pc)) }
+        // Following a PC: open on that PC's last mirrored chat, not on whatever chat was used last.
+        _state.value.pc?.let { pc ->
+            val last = all.firstOrNull { it.id.startsWith("pc-${pc.key}-") }
+            _state.update { it.copy(conversation = last ?: newConv().copy(title = pc.label)) }
+        }
     }
 
     fun saveSettings(new: Settings) {
@@ -448,7 +453,7 @@ class ChatController(
         } catch (e: ApiException) {
             return if (e is ApiException.Network) PC_UNREACHABLE else e.message ?: "Couldn't reach OpenCode"
         }
-        val password = OPENCODE_PASSWORD.find(out)?.groupValues?.get(1)
+        val password = passwordIn(out)
             ?: return "OpenCode isn't running on the PC and couldn't be started. Open one of its desktop shortcuts once."
         if (password != s.openCodePassword) {
             val new = s.copy(openCodePassword = password)
@@ -798,7 +803,7 @@ class ChatController(
             return "Something else is using the laptop's GPU."
         }
         if (out.contains("MODEL-FAILED") || out.contains("SERVER-FAILED")) return "The laptop couldn't start: " + out.trim().takeLast(400)
-        val password = OPENCODE_PASSWORD.find(out)?.groupValues?.get(1) ?: return "Couldn't read OpenCode's password on the laptop."
+        val password = passwordIn(out) ?: return "Couldn't read OpenCode's password on the laptop."
         if (password != s.laptopOpenCodePassword) {
             val new = s.copy(laptopOpenCodePassword = password)
             settingsStore.save(new)
@@ -831,7 +836,7 @@ class ChatController(
             try { laptopOpenCode.sessions(1); return true } catch (e: ApiException.Network) { return false } catch (e: ApiException) { /* new password */ }
         }
         val out = try { laptopTokenSaver.run(LAPTOP_PASSWORD_COMMAND) } catch (e: ApiException) { return false }
-        val password = OPENCODE_PASSWORD.find(out)?.groupValues?.get(1) ?: return false
+        val password = passwordIn(out) ?: return false
         if (password != s.laptopOpenCodePassword) {
             val new = s.copy(laptopOpenCodePassword = password)
             settingsStore.save(new)
@@ -973,6 +978,10 @@ class ChatController(
         }
     }
 }
+
+/** The password a link command printed; TokenSaver also echoes the command itself, whose "OCPW:\$(cat …" must not count. */
+fun passwordIn(out: String): String? =
+    OPENCODE_PASSWORD.findAll(out).map { it.groupValues[1] }.lastOrNull { !it.startsWith("\$") && !it.contains("(") }
 
 const val LAPTOP_UNREACHABLE = "Can't reach the laptop: it's off or asleep, not booted into Ubuntu, or Tailscale isn't connected."
 const val LAPTOP_PROJECTS = "/home/omegajin/Local Projects"
