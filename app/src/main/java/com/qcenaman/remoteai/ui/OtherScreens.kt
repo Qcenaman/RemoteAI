@@ -87,6 +87,10 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
     var cmd by remember { mutableStateOf(s.startCommand) }
     var maxTokens by remember { mutableStateOf(s.maxReplyTokens.toString()) }
     var stopMin by remember { mutableStateOf(s.stopThinkingMinutes.toString()) }
+    var ltHost by remember { mutableStateOf(s.laptopHost) }
+    var ltTsPort by remember { mutableStateOf(s.laptopTokenSaverPort.toString()) }
+    var ltTsToken by remember { mutableStateOf(s.laptopTokenSaverToken) }
+    var ltOcPort by remember { mutableStateOf(s.laptopOpenCodePort.toString()) }
 
     Scaffold(topBar = {
         TopAppBar(
@@ -114,13 +118,18 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
             Field("Port", tsPort, number = true) { tsPort = it }
             Field("Link token", tsToken, secret = true) { tsToken = it }
             Field("Start command", cmd) { cmd = it }
+            Section("Laptop (OpenCode with Qwen)")
+            Field("Laptop address (Tailscale IP or name)", ltHost) { ltHost = it }
+            Field("TokenSaver port", ltTsPort, number = true) { ltTsPort = it }
+            Field("TokenSaver token", ltTsToken, secret = true) { ltTsToken = it }
+            Field("OpenCode port", ltOcPort, number = true) { ltOcPort = it }
             Section("Runaway replies")
             Field("Max reply tokens (0 = no limit)", maxTokens, number = true) { maxTokens = it }
             Field("Stop thinking after, minutes (0 = off)", stopMin, number = true) { stopMin = it }
             Button(
                 onClick = {
                     onSave(
-                        Settings(
+                        s.copy(
                             host = host.trim(),
                             lmPort = lmPort.toIntOrNull() ?: s.lmPort,
                             hubPort = hubPort.toIntOrNull() ?: s.hubPort,
@@ -135,7 +144,10 @@ fun SettingsScreen(st: UiState, onSave: (Settings) -> Unit, onBack: () -> Unit) 
                             startCommand = cmd.trim(),
                             maxReplyTokens = maxTokens.trim().toIntOrNull()?.coerceAtLeast(0) ?: s.maxReplyTokens,
                             stopThinkingMinutes = stopMin.trim().toIntOrNull()?.coerceAtLeast(0) ?: s.stopThinkingMinutes,
-                            lastModel = s.lastModel,
+                            laptopHost = ltHost.trim().ifBlank { s.laptopHost },
+                            laptopTokenSaverPort = ltTsPort.toIntOrNull() ?: s.laptopTokenSaverPort,
+                            laptopTokenSaverToken = ltTsToken.trim(),
+                            laptopOpenCodePort = ltOcPort.toIntOrNull() ?: s.laptopOpenCodePort,
                         )
                     )
                 },

@@ -151,6 +151,26 @@ class OpenCodeClient(
 
     private suspend fun messages(session: String) = call(req("/api/session/$session/message?limit=200").get().build())
 
+    /** Newest first. */
+    suspend fun sessions(limit: Int = 15): List<OcSession> = parseOpenCodeSessions(call(req("/api/session?limit=$limit").get().build()))
+
+    suspend fun active(): Set<String> = parseOpenCodeActive(call(req("/api/session/active").get().build()))
+
+    /** The whole chat, oldest first, as the PC's window shows it. */
+    suspend fun transcript(session: String) = parseOpenCodeTranscript(messages(session))
+
+    suspend fun permissions(session: String): List<Approval> =
+        parseOpenCodePermissions(call(req("/api/session/$session/permission").get().build()))
+
+    /** Like typing it in the PC's window: if the model is busy, OpenCode queues it for the next turn. */
+    suspend fun prompt(session: String, text: String) {
+        post("/api/session/$session/prompt", buildJsonObject { put("text", text) }.toString())
+    }
+
+    suspend fun interrupt(session: String) {
+        post("/api/session/$session/interrupt")
+    }
+
     @Volatile private var userStop = false
 
     fun cancel() {

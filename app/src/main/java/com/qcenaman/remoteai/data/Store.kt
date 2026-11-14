@@ -30,6 +30,14 @@ data class Settings(
     val stopThinkingMinutes: Int = 3,
     /** Model key loaded last; Start Local AI loads it again. */
     val lastModel: String = "",
+    /** PC whose OpenCode window the phone follows ("desktop" / "laptop"), blank for none. */
+    val pc: String = "",
+    val laptopHost: String = "100.109.184.29",
+    val laptopTokenSaverPort: Int = 8766,
+    val laptopTokenSaverToken: String = "",
+    val laptopOpenCodePort: Int = 4096,
+    /** Fetched from the laptop through its TokenSaver; never typed. */
+    val laptopOpenCodePassword: String = "",
 )
 
 interface SettingsStore {
@@ -65,6 +73,12 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             maxReplyTokens = prefs.getInt("maxReplyTokens", d.maxReplyTokens),
             stopThinkingMinutes = prefs.getInt("stopThinkingMinutes", d.stopThinkingMinutes),
             lastModel = prefs.getString("lastModel", "") ?: "",
+            pc = prefs.getString("pc", "") ?: "",
+            laptopHost = prefs.getString("laptopHost", d.laptopHost) ?: d.laptopHost,
+            laptopTokenSaverPort = prefs.getInt("laptopTokenSaverPort", d.laptopTokenSaverPort),
+            laptopTokenSaverToken = prefs.getString("laptopTokenSaverToken", "") ?: "",
+            laptopOpenCodePort = prefs.getInt("laptopOpenCodePort", d.laptopOpenCodePort),
+            laptopOpenCodePassword = prefs.getString("laptopOpenCodePassword", "") ?: "",
         )
     }
 
@@ -85,6 +99,12 @@ class EncryptedSettingsStore(context: Context) : SettingsStore {
             .putInt("maxReplyTokens", s.maxReplyTokens.coerceAtLeast(0))
             .putInt("stopThinkingMinutes", s.stopThinkingMinutes.coerceAtLeast(0))
             .putString("lastModel", s.lastModel)
+            .putString("pc", s.pc)
+            .putString("laptopHost", s.laptopHost.trim())
+            .putInt("laptopTokenSaverPort", s.laptopTokenSaverPort)
+            .putString("laptopTokenSaverToken", s.laptopTokenSaverToken.trim())
+            .putInt("laptopOpenCodePort", s.laptopOpenCodePort)
+            .putString("laptopOpenCodePassword", s.laptopOpenCodePassword)
             .apply()
     }
 }

@@ -43,8 +43,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * Polls the approval server while the app is in front, and also in the background while a reply is open:
      * a blocked pc call only waits ~50 s, so an approval must reach the user even with the screen off.
      */
+    private var live: Job? = null
+    private var reconnected = false
+
+    /** While a PC is followed and the app is in front: mirror its OpenCode window every 2 s. */
+    private fun followPc() {
+        if (live?.isActive == true) return
+        live = viewModelScope.launch {
+            while (isActive && foreground && state.value.pc != null) {
+                controller.pollLive()
+                delay(2_000)
+            }
+        }
+    }
+
+    fun selectPc(pc: com.qcenaman.remoteai.net.Pc, gpu: String = "ask") = viewModelScope.launch {
+        controller.selectPc(pc, gpu = gpu)
+        followPc()
+    }
+
+    fun stop() = viewModelScope.launch { if (state.value.pc != null) controller.stopPc() else controller.stop() }
+
     fun onForeground() {
         foreground = true
+        state.value.pc?.let { pc ->
+            if (!reconnected) {
+                reconnected = true
+                viewModelScope.launch { controller.selectPc(pc, start = false); followPc() }
+            } else followPc()
+        }
         ApprovalNotifier.clear(getApplication())
         if (poller?.isActive == true) return
         poller = viewModelScope.launch {
@@ -80,8 +107,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() = viewModelScope.launch { controller.refreshModels(); controller.pollApprovals() }
     fun startLocalAI() = viewModelScope.launch { controller.startLocalAI() }
     fun killLocalAI() = viewModelScope.launch { controller.killLocalAI() }
-    fun restartLocalAI() = viewModelScope.launch { controller.restartLocalAI() }
     fun chooseModel(key: String) = viewModelScope.launch { controller.chooseModel(key) }
+    fun restartLocalAIThenFollow() = viewModelScope.launch { controller.restartLocalAI(); followPc() }
     fun saveSettings(s: Settings) {
         controller.saveSettings(s)
         refresh()

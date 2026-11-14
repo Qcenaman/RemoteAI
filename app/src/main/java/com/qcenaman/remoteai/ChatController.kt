@@ -26,6 +26,13 @@ import com.qcenaman.remoteai.net.Watchdog
 import com.qcenaman.remoteai.net.TokenSaverClient
 import com.qcenaman.remoteai.net.baseUrl
 import com.qcenaman.remoteai.net.killCommand
+import com.qcenaman.remoteai.net.DESKTOP_QWEN
+import com.qcenaman.remoteai.net.LAPTOP_PASSWORD_COMMAND
+import com.qcenaman.remoteai.net.LAPTOP_STOP_COMMAND
+import com.qcenaman.remoteai.net.OcSession
+import com.qcenaman.remoteai.net.Pc
+import com.qcenaman.remoteai.net.laptopStartCommand
+import com.qcenaman.remoteai.net.pickWindowSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -53,6 +60,15 @@ data class UiState(
     val loadingModel: String = "",
     /** Kill or restart in progress on the PC ("Killing local AI…"), blank when none. */
     val pcAction: String = "",
+    /** PC whose OpenCode window this screen follows live; null for normal chats. */
+    val pc: Pc? = null,
+    val pcConnecting: Boolean = false,
+    /** What's going on with the PC link, blank when all is well. */
+    val pcStatus: String = "",
+    /** The model on the PC is working on the window's chat right now. */
+    val pcWorking: Boolean = false,
+    /** Laptop only: what else is using its GPU, so the user can stop it or go on anyway. */
+    val pcGpuBusy: String = "",
 )
 
 fun newConv() = Conversation(UUID.randomUUID().toString(), "New chat", System.currentTimeMillis())
@@ -90,6 +106,19 @@ class ChatController(
     private val tokenSaver = tokenSaverFactory({ baseUrl(s.host, s.tokenSaverPort) }, { s.tokenSaverToken })
     private val hub = hubFactory { baseUrl(s.host, s.hubPort) }
     private val openCode = openCodeFactory({ baseUrl(s.host, s.openCodePort) }, { s.openCodePassword })
+    private val laptopTokenSaver = tokenSaverFactory({ baseUrl(s.laptopHost, s.laptopTokenSaverPort) }, { s.laptopTokenSaverToken })
+    private val laptopOpenCode = openCodeFactory({ baseUrl(s.laptopHost, s.laptopOpenCodePort) }, { s.laptopOpenCodePassword })
+
+    private fun ocFor(pc: Pc) = if (pc == Pc.LAPTOP) laptopOpenCode else openCode
+
+    /** OpenCode permission requests of the followed window: request id -> (session, PC). */
+    private val livePending = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Pc>>()
+
+    /** The window's chat the screen shows, and when it last changed. */
+    @Volatile private var liveSession: String? = null
+    @Volatile private var liveUpdated = -1L
+    @Volatile private var liveDir = ""
+    private val liveLock = Mutex()
 
     /** OpenCode permission requests on screen: request id -> session. */
     private val openCodePending = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -107,7 +136,7 @@ class ChatController(
             conversation = all.firstOrNull() ?: newConv(),
             conversations = all,
         )
-        _state.update { it.copy(model = it.conversation.model) }
+        _state.update { it.copy(model = it.conversation.model, pc = Pc.of(it.settings.pc)) }
     }
 
     fun saveSettings(new: Settings) {
@@ -121,6 +150,14 @@ class ChatController(
         openCode.cancel()
     }
 
+    /** Stop button while following a PC: interrupts the model there, as Esc does in its window. */
+    suspend fun stopPc() {
+        val pc = _state.value.pc ?: return
+        val id = liveSession ?: return
+        try { ocFor(pc).interrupt(id) } catch (e: ApiException) { /* it may have just ended */ }
+        pollLive()
+    }
+
     /** Resends a message as a fresh attempt (the stopped reply never became part of the model's history). */
     suspend fun retry(text: String) = send(text)
 
@@ -131,6 +168,7 @@ class ChatController(
      * Other loaded chat models are unloaded so two big models don't fight over the GPU.
      */
     suspend fun chooseModel(key: String): Boolean {
+        leavePc()
         val m = _state.value.models.firstOrNull { it.key == key || it.id == key }
         if (m != null && m.loaded) {
             _state.update { it.copy(model = m.id) }
@@ -220,10 +258,14 @@ class ChatController(
             ?: ms.firstOrNull { !it.hub }?.key
     }
 
-    fun newConversation() = _state.update { it.copy(conversation = newConv()) }
+    fun newConversation() {
+        leavePc()
+        _state.update { it.copy(conversation = newConv()) }
+    }
 
     fun openConversation(id: String) {
         val c = store.all().firstOrNull { it.id == id } ?: return
+        leavePc()
         _state.update { it.copy(conversation = c, model = c.model.ifBlank { it.model }) }
     }
 
@@ -290,7 +332,7 @@ class ChatController(
         }
         try {
             val list = approvalsApi.pending()
-            _state.update { it.copy(pending = list + it.pending.filter { a -> openCodePending.containsKey(a.id) }, approvals = Link.OK) }
+            _state.update { it.copy(pending = list + it.pending.filter { a -> openCodePending.containsKey(a.id) || livePending.containsKey(a.id) }, approvals = Link.OK) }
         } catch (e: ApiException) {
             _state.update { it.copy(approvals = linkFor(e)) }
         }
@@ -309,6 +351,7 @@ class ChatController(
     suspend fun send(text: String) {
         val input = text.trim()
         if (input.isEmpty()) return
+        if (_state.value.pc != null) return sendToPc(input)
         val retry = mutableListOf<String>()
         chatLock.withLock {
             saveConv { c ->
@@ -388,28 +431,28 @@ class ChatController(
     }
 
     private suspend fun linkOpenCode(): Boolean {
-        if (s.tokenSaverToken.isBlank()) {
-            note("Add the TokenSaver link token in Settings to use this model.")
-            return false
-        }
+        val problem = linkOpenCodeProblem() ?: return true
+        note(problem)
+        return false
+    }
+
+    /** Makes the desktop's OpenCode service reachable and fetches its password; returns what went wrong, or null. */
+    private suspend fun linkOpenCodeProblem(): String? {
+        if (s.tokenSaverToken.isBlank()) return "Add the TokenSaver link token in Settings to use this model."
         val out = try {
             runElevated(openCodeLinkCommand(s.openCodePort))
         } catch (e: ApiException) {
-            note(if (e is ApiException.Network) PC_UNREACHABLE else e.message ?: "Couldn't reach OpenCode")
-            return false
+            return if (e is ApiException.Network) PC_UNREACHABLE else e.message ?: "Couldn't reach OpenCode"
         }
         val password = OPENCODE_PASSWORD.find(out)?.groupValues?.get(1)
-        if (password == null) {
-            note("OpenCode isn't running on the PC and couldn't be started. Open one of its desktop shortcuts once.")
-            return false
-        }
+            ?: return "OpenCode isn't running on the PC and couldn't be started. Open one of its desktop shortcuts once."
         if (password != s.openCodePassword) {
             val new = s.copy(openCodePassword = password)
             settingsStore.save(new)
             _state.update { it.copy(settings = new) }
         }
         openCodeLinked = true
-        return true
+        return null
     }
 
     /** Hub models run through OpenCode on the PC, with its agent and tools; a chat maps to one OpenCode session. */
@@ -517,8 +560,10 @@ class ChatController(
         val inPlace = st0.busy && st0.pending.any { it.id == id && it.waiting }
         var ok = false
         try {
+            val live = livePending[id]
             val session = openCodePending[id]
-            if (session != null) openCode.reply(session, id, approve)
+            if (live != null) ocFor(live.second).reply(live.first, id, approve)
+            else if (session != null) openCode.reply(session, id, approve)
             else if (approve) approvalsApi.approve(id) else approvalsApi.deny(id)
             ok = true
         } catch (e: ApiException.NotFound) {
@@ -528,6 +573,10 @@ class ChatController(
             note(e.message ?: "Approval request failed")
         } finally {
             _state.update { it.copy(deciding = it.deciding - id, pending = if (ok) it.pending.filter { a -> a.id != id } else it.pending) }
+        }
+        if (livePending.remove(id) != null) { // OpenCode carries on by itself, the window shows it
+            pollLive()
+            return
         }
         pollApprovals()
         if (ok && inPlace) {
@@ -597,6 +646,7 @@ class ChatController(
      * Goes through TokenSaver (elevated), so it works even when LM Studio is hung or not answering.
      */
     suspend fun killLocalAI(): Boolean {
+        if (_state.value.pc == Pc.LAPTOP) return stopLaptop()
         _state.update { it.copy(pcAction = "Killing local AI on the PC…", startOutput = "") }
         return try {
             kill()
@@ -642,6 +692,13 @@ class ChatController(
 
     /** Restart button: kills everything, starts LM Studio again and loads the model that was selected. */
     suspend fun restartLocalAI() {
+        if (_state.value.pc == Pc.LAPTOP) {
+            if (stopLaptop()) {
+                kotlinx.coroutines.delay(restartGapMs)
+                selectPc(Pc.LAPTOP)
+            }
+            return
+        }
         val st = _state.value
         val key = st.models.firstOrNull { it.id == st.model }?.key ?: st.model.ifBlank { null } ?: preferredModel()
         _state.update { it.copy(pcAction = "Restarting local AI on the PC…", startOutput = "") }
@@ -660,14 +717,225 @@ class ChatController(
 
     /** The close button on the status card. */
     fun dismissStartOutput() {
-        _state.update { it.copy(startOutput = "") }
+        _state.update { it.copy(startOutput = "", pcGpuBusy = "", pcStatus = if (it.pcConnecting) it.pcStatus else "") }
+    }
+
+    private fun setPcSetting(pc: Pc?) {
+        val key = pc?.key.orEmpty()
+        if (s.pc == key) return
+        val new = s.copy(pc = key)
+        settingsStore.save(new)
+        _state.update { it.copy(settings = new) }
+    }
+
+    private fun leavePc() {
+        if (_state.value.pc == null) return
+        setPcSetting(null)
+        liveSession = null
+        val mine = livePending.keys.toSet()
+        livePending.clear()
+        _state.update { it.copy(pc = null, pcStatus = "", pcWorking = false, pcGpuBusy = "", pending = it.pending.filter { a -> a.id !in mine }) }
+    }
+
+    /**
+     * Picked in the menu: makes sure the PC's Qwen model and OpenCode are running (start = false only reconnects),
+     * then the screen follows the chat in the PC's OpenCode window. gpu: laptop only, "stop-gpu" or "continue"
+     * after it reported something else on its GPU.
+     */
+    suspend fun selectPc(pc: Pc, start: Boolean = true, gpu: String = "ask"): Boolean {
+        if (_state.value.pcConnecting) return false
+        setPcSetting(pc)
+        if (_state.value.pc != pc) {
+            liveSession = null
+            liveUpdated = -1
+            _state.update { it.copy(pc = pc, conversation = newConv().copy(title = pc.label)) }
+        }
+        _state.update { it.copy(pcConnecting = true, pcGpuBusy = "", pcWorking = false,
+            pcStatus = if (start) "Starting ${pc.model} and OpenCode on the ${pc.label}…" else "Connecting to the ${pc.label}…") }
+        val problem = try {
+            if (pc == Pc.LAPTOP) connectLaptop(start, gpu) else connectDesktop(start)
+        } finally {
+            _state.update { it.copy(pcConnecting = false) }
+        }
+        _state.update { it.copy(pcStatus = problem.orEmpty()) }
+        if (problem != null) return false
+        liveUpdated = -1
+        pollLive()
+        return _state.value.pcStatus.isBlank()
+    }
+
+    private suspend fun connectDesktop(start: Boolean): String? {
+        if (start) {
+            refreshModels()
+            // Some model of the hub already up (maybe what the window is using): keep it, only start Qwen when none is.
+            if (_state.value.models.none { it.hub && it.loaded }) {
+                val qwen = _state.value.models.firstOrNull { it.hub && it.key == DESKTOP_QWEN }
+                    ?: return "The desktop's Qwen model isn't set up in RemoteAI."
+                if (!chooseHubModel(qwen)) return _state.value.startOutput.ifBlank { "Couldn't start ${qwen.label} on the desktop." }
+                _state.update { it.copy(startOutput = "") }
+            }
+        }
+        return linkOpenCodeProblem()
+    }
+
+    private suspend fun connectLaptop(start: Boolean, gpu: String): String? {
+        if (s.laptopTokenSaverToken.isBlank()) return "Add the laptop's TokenSaver token in Settings (Laptop section)."
+        val out = try {
+            laptopTokenSaver.run(if (start) laptopStartCommand(gpu) else LAPTOP_PASSWORD_COMMAND)
+        } catch (e: ApiException) {
+            return if (e is ApiException.Network) LAPTOP_UNREACHABLE else "Laptop: ${e.message}"
+        }
+        if (out.lines().any { it.trim() == "GPU-BUSY" }) {
+            val what = out.lines().map { it.trim() }.filter { it.isNotBlank() && it != "GPU-BUSY" && !it.startsWith("OCPW:") &&
+                !it.startsWith("Job ") && !it.startsWith("$ ") && !it.startsWith("Last ") && !it.startsWith("Full output") }
+            _state.update { it.copy(pcGpuBusy = what.joinToString("
+").ifBlank { "another AI program" }) }
+            return "Something else is using the laptop's GPU."
+        }
+        if (out.contains("MODEL-FAILED") || out.contains("SERVER-FAILED")) return "The laptop couldn't start: " + out.trim().takeLast(400)
+        val password = OPENCODE_PASSWORD.find(out)?.groupValues?.get(1) ?: return "Couldn't read OpenCode's password on the laptop."
+        if (password != s.laptopOpenCodePassword) {
+            val new = s.copy(laptopOpenCodePassword = password)
+            settingsStore.save(new)
+            _state.update { it.copy(settings = new) }
+        }
+        // The model can take longer to load than one TokenSaver call waits: wait for the server to answer.
+        val until = clock() + if (start) startWaitMs * 7 else 0
+        while (true) {
+            try {
+                laptopOpenCode.sessions(1)
+                return null
+            } catch (e: ApiException) {
+                if (clock() >= until) {
+                    return if (start) "OpenCode on the laptop didn't come up." else
+                        "OpenCode isn't running on the laptop. Pick Laptop in the menu to start it."
+                }
+            }
+            kotlinx.coroutines.delay(startPollMs)
+        }
+    }
+
+    /** Called every couple of seconds while a PC is followed: mirrors the window's chat and what it's waiting on. */
+    suspend fun pollLive() {
+        liveLock.withLock { pollLiveLocked() }
+    }
+
+    private suspend fun pollLiveLocked() {
+        val st0 = _state.value
+        val pc = st0.pc ?: return
+        if (st0.pcConnecting) return
+        val oc = ocFor(pc)
+        try {
+            val sessions = oc.sessions()
+            val active = try { oc.active() } catch (e: ApiException) { emptySet() }
+            val win = pickWindowSession(sessions, active)
+            if (win == null) {
+                _state.update { it.copy(pcWorking = false, pcStatus = "") }
+                return
+            }
+            val working = win.id in active || win.busy
+            if (win.id != liveSession || win.updated != liveUpdated || working || st0.pcWorking) {
+                val items = oc.transcript(win.id)
+                if (_state.value.pc != pc) return // switched away meanwhile
+                liveSession = win.id
+                liveUpdated = win.updated
+                liveDir = win.directory
+                showLive(pc, win, items)
+            }
+            val asked = if (working) try { oc.permissions(win.id) } catch (e: ApiException) { emptyList() } else emptyList()
+            val ids = asked.map { it.id }.toSet()
+            val gone = livePending.keys.filter { it !in ids }
+            gone.forEach { livePending.remove(it) }
+            asked.forEach { livePending[it.id] = win.id to pc }
+            _state.update { u ->
+                u.copy(
+                    pcWorking = working,
+                    pcStatus = "",
+                    pending = u.pending.filter { it.id !in gone } + asked.filter { a -> u.pending.none { it.id == a.id } },
+                )
+            }
+        } catch (e: ApiException) {
+            if (_state.value.pc != pc) return
+            if (e is ApiException.Unauthorized) { // the server restarted with a new password: fetch it again
+                if (pc == Pc.DESKTOP) openCodeLinked = false
+                val problem = if (pc == Pc.LAPTOP) connectLaptop(start = false, gpu = "ask") else linkOpenCodeProblem()
+                if (problem == null) return
+            }
+            _state.update {
+                it.copy(pcWorking = false, pcStatus = when {
+                    e is ApiException.Network && pc == Pc.LAPTOP -> "Can't reach OpenCode on the laptop. Pick Laptop in the menu to start it."
+                    e is ApiException.Network -> "Can't reach OpenCode on the desktop. Pick Desktop in the menu to start it."
+                    else -> "${pc.label}: ${e.message}"
+                })
+            }
+        }
+    }
+
+    private fun showLive(pc: Pc, win: OcSession, items: List<ChatItem>) {
+        val conv = Conversation(
+            id = "pc-${pc.key}-${win.id}",
+            title = "${pc.label} · " + win.title.ifBlank { "New chat" },
+            updated = System.currentTimeMillis(),
+            responseId = win.id,
+            model = if (pc == Pc.DESKTOP) _state.value.models.firstOrNull { it.hub && it.loaded }?.id ?: DESKTOP_QWEN else "",
+            items = items,
+        )
+        if (items.isNotEmpty()) store.put(conv)
+        _state.update { it.copy(conversation = conv, conversations = store.all()) }
+    }
+
+    /** Like typing in the PC's window: the window shows it too, and a busy model gets it at its next turn. */
+    private suspend fun sendToPc(input: String) {
+        val pc = _state.value.pc ?: return
+        val oc = ocFor(pc)
+        _state.update { st -> st.copy(conversation = st.conversation.copy(items = st.conversation.items + ChatItem("user", input))) }
+        try {
+            val id = liveSession ?: run {
+                val model = if (pc == Pc.DESKTOP) _state.value.models.firstOrNull { it.hub && it.loaded }?.id ?: DESKTOP_QWEN else "coder"
+                val dir = liveDir.ifBlank { if (pc == Pc.DESKTOP) s.projectFolder else LAPTOP_PROJECTS }
+                oc.createSession("elai-$model", model, dir).also { liveSession = it }
+            }
+            oc.prompt(id, input)
+            liveUpdated = -1
+            _state.update { it.copy(pcWorking = true) }
+        } catch (e: ApiException) {
+            _state.update { st ->
+                st.copy(conversation = st.conversation.copy(items = st.conversation.items +
+                    ChatItem("note", "Couldn't send to the ${pc.label}: ${if (e is ApiException.Network) "can't reach it" else e.message}", retry = input)))
+            }
+            return
+        }
+        pollLive()
+    }
+
+    /** Kill on the laptop: stops OpenCode's server and the model there, as closing its shortcut window does. */
+    private suspend fun stopLaptop(): Boolean {
+        if (s.laptopTokenSaverToken.isBlank()) {
+            _state.update { it.copy(pcStatus = "Add the laptop's TokenSaver token in Settings (Laptop section).") }
+            return false
+        }
+        _state.update { it.copy(pcAction = "Stopping the model and OpenCode on the laptop…") }
+        return try {
+            val out = laptopTokenSaver.run(LAPTOP_STOP_COMMAND)
+            _state.update { it.copy(pcWorking = false, pcStatus = if (out.contains("STOPPED")) "Laptop AI stopped. Pick Laptop in the menu to start it again." else out.trim().takeLast(300)) }
+            true
+        } catch (e: ApiException) {
+            _state.update { it.copy(pcStatus = if (e is ApiException.Network) LAPTOP_UNREACHABLE else "Laptop: ${e.message}") }
+            false
+        } finally {
+            _state.update { it.copy(pcAction = "") }
+        }
     }
 }
+
+const val LAPTOP_UNREACHABLE = "Can't reach the laptop: it's off or asleep, not booted into Ubuntu, or Tailscale isn't connected."
+const val LAPTOP_PROJECTS = "/home/omegajin/Local Projects"
 
 const val PC_UNREACHABLE = "Can't reach the PC: it's off or asleep, or Tailscale isn't connected on the PC or this phone."
 
 /** Fills only blank token fields, so an outside launch can never overwrite tokens already set. */
-fun fillEmptyTokens(s: Settings, lm: String?, approval: String?, tokenSaver: String?): Settings = s.copy(
+fun fillEmptyTokens(s: Settings, lm: String?, approval: String?, tokenSaver: String?, laptopTokenSaver: String? = null): Settings = s.copy(
+    laptopTokenSaverToken = s.laptopTokenSaverToken.ifBlank { laptopTokenSaver?.trim().orEmpty() },
     lmToken = s.lmToken.ifBlank { lm?.trim().orEmpty() },
     approvalToken = s.approvalToken.ifBlank { approval?.trim().orEmpty() },
     tokenSaverToken = s.tokenSaverToken.ifBlank { tokenSaver?.trim().orEmpty() },

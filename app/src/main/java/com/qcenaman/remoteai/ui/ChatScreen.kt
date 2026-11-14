@@ -82,6 +82,10 @@ import com.qcenaman.remoteai.Link
 import com.qcenaman.remoteai.UiState
 import com.qcenaman.remoteai.data.ChatItem
 import com.qcenaman.remoteai.net.Approval
+import com.qcenaman.remoteai.net.Pc
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.LaptopChromebook
+import androidx.compose.material3.HorizontalDivider
 import com.qcenaman.remoteai.net.promptLine
 import com.qcenaman.remoteai.net.replyLine
 
@@ -103,6 +107,8 @@ fun ChatScreen(
     onStop: () -> Unit,
     onRetry: (String) -> Unit,
     onDismissStatus: () -> Unit,
+    onPc: (Pc) -> Unit,
+    onPcGpu: (Pc, String) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -126,8 +132,9 @@ fun ChatScreen(
                 .fillMaxSize()
                 .imePadding()
         ) {
-            ModelRow(st, onModel, onRefresh, onKillLocalAI, onRestartLocalAI)
-            StatusBanner(st, onRefresh, onStartLocalAI, onSettings, onDismissStatus)
+            ModelRow(st, onModel, onPc, onRefresh, onKillLocalAI, onRestartLocalAI)
+            if (st.pc != null) PcBanner(st, st.pc, onPc, onPcGpu, onSettings, onDismissStatus)
+            else StatusBanner(st, onRefresh, onStartLocalAI, onSettings, onDismissStatus)
             st.pending.forEach { a -> ApprovalCard(a, a.id in st.deciding, onApprove, onDeny) }
 
             val list = rememberLazyListState()
@@ -156,8 +163,9 @@ fun ChatScreen(
                     ItemView(item, st.conversation.title, onRetry.takeIf { i == lastRetry && !st.busy })
                 }
             }
-            if (st.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-            InputBar(busy = st.busy, onSend = onSend, onStop = onStop)
+            val working = st.busy || st.pcWorking
+            if (working) LinearProgressIndicator(Modifier.fillMaxWidth())
+            InputBar(busy = working, onSend = onSend, onStop = onStop)
         }
     }
 }
@@ -167,6 +175,7 @@ fun ChatScreen(
 private fun ModelRow(
     st: UiState,
     onModel: (String) -> Unit,
+    onPc: (Pc) -> Unit,
     onRefresh: () -> Unit,
     onKill: () -> Unit,
     onRestart: () -> Unit,
@@ -185,13 +194,14 @@ private fun ModelRow(
                 onClick = { onRefresh(); open = true },
                 enabled = !busyLoading && !st.busy && !pcBusy,
                 leadingIcon = {
-                    if (busyLoading) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.Default.Memory, null, Modifier.size(18.dp))
+                    if (busyLoading || st.pcConnecting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    else Icon(pcIcon(st.pc) ?: Icons.Default.Memory, null, Modifier.size(18.dp))
                 },
                 trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, Modifier.size(18.dp)) },
                 label = {
                     Text(
                         when {
+                            st.pc != null -> "${st.pc.label} · ${st.pc.model}"
                             busyLoading -> "Loading ${st.loadingModel}…"
                             current != null -> current.label
                             st.model.isNotBlank() -> st.model
@@ -204,6 +214,27 @@ private fun ModelRow(
                 },
             )
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                Text("PC · OpenCode window", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                Pc.entries.forEach { pc ->
+                    DropdownMenuItem(
+                        leadingIcon = {
+                            Icon(if (st.pc == pc) Icons.Default.CheckCircle else pcIcon(pc)!!, null, Modifier.size(18.dp),
+                                tint = if (st.pc == pc) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        },
+                        text = {
+                            Column {
+                                Text(pc.label)
+                                Text("${pc.model} · see and continue its OpenCode chat", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        },
+                        onClick = { open = false; onPc(pc) },
+                    )
+                }
+                HorizontalDivider()
+                Text("Other models", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 if (st.models.isEmpty()) {
                     DropdownMenuItem(
                         text = { Text(if (st.lm == Link.OK) "No chat models on the PC" else "Can't reach LM Studio · tap to retry") },
@@ -233,7 +264,7 @@ private fun ModelRow(
                                 )
                             }
                         },
-                        onClick = { open = false; if (!active) onModel(m.key) },
+                        onClick = { open = false; if (!active || st.pc != null) onModel(m.key) },
                     )
                 }
             }
@@ -249,7 +280,7 @@ private fun ModelRow(
         }
         IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "Refresh") }
     }
-    val model = st.models.firstOrNull { it.id == st.model }?.label ?: st.model.ifBlank { st.settings.lastModel }
+    val model = st.pc?.model ?: st.models.firstOrNull { it.id == st.model }?.label ?: st.model.ifBlank { st.settings.lastModel }
     confirm?.let { what ->
         val kill = what == "kill"
         AlertDialog(
@@ -257,7 +288,9 @@ private fun ModelRow(
             title = { Text(if (kill) "Kill local AI?" else "Restart local AI?") },
             text = {
                 Text(
-                    if (kill) "Stops every local model on the PC (LM Studio, lms, llama.cpp, Ollama, KoboldCpp…) and closes LM Studio."
+                    if (st.pc == Pc.LAPTOP) (if (kill) "Stops OpenCode's server and the model on the laptop (an open OpenCode window there loses its connection)."
+                        else "Stops OpenCode and the model on the laptop, then starts them again.")
+                    else if (kill) "Stops every local model on the PC (LM Studio, lms, llama.cpp, Ollama, KoboldCpp…) and closes LM Studio."
                     else "Kills everything, starts LM Studio again and loads " +
                         (if (model.isNotBlank()) model else "the last model used") + "."
                 )
@@ -267,6 +300,51 @@ private fun ModelRow(
             },
             dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
         )
+    }
+}
+
+private fun pcIcon(pc: Pc?) = when (pc) {
+    Pc.DESKTOP -> Icons.Default.Computer
+    Pc.LAPTOP -> Icons.Default.LaptopChromebook
+    null -> null
+}
+
+/** What's going on with the followed PC: starting, unreachable, or something else on the laptop's GPU. */
+@Composable
+private fun PcBanner(st: UiState, pc: Pc, onPc: (Pc) -> Unit, onGpu: (Pc, String) -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) {
+    val text = listOf(st.pcAction, st.pcStatus, st.pcGpuBusy, st.startOutput.takeIf { st.pcConnecting }.orEmpty())
+        .filter { it.isNotBlank() }.distinct().joinToString("\n\n")
+    if (text.isBlank()) return
+    val connecting = st.pcConnecting || st.pcAction.isNotBlank()
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor =
+            if (connecting) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer),
+    ) {
+        val fg = if (connecting) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (connecting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Text(text, color = fg, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
+                    maxLines = 10, overflow = TextOverflow.Ellipsis)
+            }
+            if (!connecting) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (st.pcGpuBusy.isNotBlank()) {
+                        Button(onClick = { onGpu(pc, "stop-gpu") }) { Text("Stop it") }
+                        TextButton(onClick = { onGpu(pc, "continue") }) { Text("Continue anyway") }
+                    } else {
+                        if (st.pcStatus.contains("Settings")) TextButton(onClick = onSettings) { Text("Settings") }
+                        TextButton(onClick = { onPc(pc) }) { Text("Retry") }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    CopyButton(text, "Copied", fg)
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Close, "Close", Modifier.size(18.dp), tint = fg)
+                    }
+                }
+            }
+        }
     }
 }
 

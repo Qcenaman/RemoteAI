@@ -46,8 +46,14 @@ class MainActivity : ComponentActivity() {
             i?.getStringExtra("lmToken"),
             i?.getStringExtra("approvalToken"),
             i?.getStringExtra("tokenSaverToken"),
+            i?.getStringExtra("laptopTokenSaverToken"),
         )
         if (filled != st) vm.saveSettings(filled)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        provision(intent)
     }
 
     override fun onStart() {
@@ -91,8 +97,10 @@ fun App(vm: MainViewModel) {
             onRefresh = { vm.refresh() },
             onStartLocalAI = { vm.startLocalAI() },
             onKillLocalAI = { vm.killLocalAI() },
-            onRestartLocalAI = { vm.restartLocalAI() },
-            onStop = { vm.controller.stop() },
+            onRestartLocalAI = { vm.restartLocalAIThenFollow() },
+            onStop = { vm.stop() },
+            onPc = { vm.selectPc(it) },
+            onPcGpu = { pc, how -> vm.selectPc(pc, how) },
             onRetry = { vm.retry(it) },
             onDismissStatus = { vm.dismissStatus() },
         )
