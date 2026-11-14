@@ -787,9 +787,8 @@ class ChatController(
         }
         if (out.lines().any { it.trim() == "GPU-BUSY" }) {
             val what = out.lines().map { it.trim() }.filter { it.isNotBlank() && it != "GPU-BUSY" && !it.startsWith("OCPW:") &&
-                !it.startsWith("Job ") && !it.startsWith("$ ") && !it.startsWith("Last ") && !it.startsWith("Full output") }
-            _state.update { it.copy(pcGpuBusy = what.joinToString("
-").ifBlank { "another AI program" }) }
+                !it.startsWith("Job ") && !it.startsWith("\$ ") && !it.startsWith("Last ") && !it.startsWith("Full output") }
+            _state.update { it.copy(pcGpuBusy = what.joinToString("\n").ifBlank { "another AI program" }) }
             return "Something else is using the laptop's GPU."
         }
         if (out.contains("MODEL-FAILED") || out.contains("SERVER-FAILED")) return "The laptop couldn't start: " + out.trim().takeLast(400)
